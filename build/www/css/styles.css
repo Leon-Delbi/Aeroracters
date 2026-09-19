@@ -976,7 +976,6 @@ html, body {
   place-items: center;
   background: linear-gradient(118deg, #1e8ecb 0%, #62bde9 34%, #a9def6 64%, #e8f9ff 100%);
   font-family: "Segoe UI", Tahoma, sans-serif;
-  cursor: progress;
   transition: opacity .45s ease, visibility .45s ease;
 }
 #boot.boot-done { opacity: 0; visibility: hidden; pointer-events: none; }
