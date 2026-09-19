@@ -46,6 +46,28 @@ const bx = (icon) => /\.(png|jpe?g|gif|webp|svg|ico)$/i.test(icon || "")
 const openWindows = {};      // key -> record
 let cascade = 0;             // offset for staggered placement
 
+$("#login_go").on("click", function () {
+    const name = $("#login_name").val().trim();
+    const room = $("#login_room").val().trim();
+
+    if (!name) {
+        $("#login_error").text("Please enter a name.").show();
+        return;
+    }
+
+    // Hide inputs and error messages
+    $("#login_name, #login_room, #login_go, #login_error").hide();
+
+    // Show the marquee progress bar
+    $("#login_progress").show();
+
+    // Simulate boot/login process, then transition to desktop
+    setTimeout(function () {
+        $("#boot").fadeOut(500, function () {
+            $("#content").fadeIn(500); // Reveals the main desktop layout
+        });
+    }, 1000); // Adjust delay duration as needed
+});
 
 /* =======================================================
    Boot screen: the Windows 7 logon look
@@ -53,8 +75,6 @@ let cascade = 0;             // offset for staggered placement
    and hard-capped so a slow asset can never trap the visitor
    behind it. Tune the two constants below.
    ======================================================= */
-const BOOT_MIN_MS = 1700;   // shortest time the boot screen stays up
-const BOOT_MAX_MS = 7000;   // longest, no matter what the network does
 const bootStarted = Date.now();
 let bootHidden = false;
 
