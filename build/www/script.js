@@ -91,8 +91,6 @@ function hideBoot() {
 // How long we still owe the boot screen before it may go away.
 const bootRemaining = () => Math.max(0, BOOT_MIN_MS - (Date.now() - bootStarted));
 
-setTimeout(hideBoot, BOOT_MAX_MS);
-
 const desktopEl = document.getElementById("desktop");
 
 /* =======================================================
