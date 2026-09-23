@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>BonziCPU Documentation</title>
+
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="mobile-web-app-capable" content="yes" />
+
+    <link rel="shortcut icon" href="/favicons/favicon.ico">
+    <meta name="theme-color" content="#ffffff">
+
+    <link rel="stylesheet" type="text/css" href="./readme.css">
+</head>
+
+<body>
+    <div id="content">
+        <p><img src="./img/readme/logo.png" alt="BonziWORLD logo. I may have taken &quot;inspiration&quot; from WinXP."></p>
+        <h1 id="bonziworld">BonziWORLD</h1>
+        <h6 id="leading-the-industry-in-gorilla-based-chat-clients">Leading the industry in gorilla-based chat clients.</h6>
+        
+        <h2>Supported Microcode Table</h2>
+        <p>This is the full Microcode table for BonziCPU.</p>
+        <ul>
+            <li><strong>Register Write Instructions</strong>
+                <ul>
+                    <li><code>WR_EAX [value]</code> - Write to General Accumulator (Index 0)</li>
+                    <li><code>WR_EBX [value]</code> - Write to Base Register (Index 1)</li>
+                    <li><code>WR_ECX [value]</code> - Write to Counter Register (Index 2)</li>
+                    <li><code>WR_EDX [value]</code> - Write to Data Register (Index 3)</li>
+                    <li><code>WR_ESP [value]</code> - Write to Stack Pointer (Index 4)</li>
+                    <li><code>WR_EBP [value]</code> - Write to Base Pointer (Index 5)</li>
+                    <li><code>WR_ESI [value]</code> - Write to Source Index (Index 6)</li>
+                    <li><code>WR_EDI [value]</code> - Write to Destination Index (Index 7)</li>
+                    <li><code>WR_EIP [value]</code> - Overwrite Instruction Pointer (Index 8)</li>
+                    <li><code>WR_FLAGS [value]</code> - Overwrite System Flags Register (Index 9)</li>
+                </ul>
+            </li>
+            <li><strong>ALU Arithmetic & Logical Instructions</strong>
+                <ul>
+                    <li><code>ADD [value]</code> - Add value to <code>EAX</code></li>
+                    <li><code>SUB [value]</code> - Subtract value from <code>EAX</code></li>
+                    <li><code>MUL [value]</code> - Multiply <code>EAX</code> by value</li>
+                    <li><code>DIV [value]</code> - Divide <code>EAX</code> by value (Avoid 0!)</li>
+                    <li><code>AND [value]</code> - Bitwise AND on <code>EAX</code></li>
+                    <li><code>OR [value]</code> - Bitwise OR on <code>EAX</code></li>
+                    <li><code>XOR [value]</code> - Bitwise exclusive OR on <code>EAX</code></li>
+                    <li><code>NOT</code> - Invert all bits in <code>EAX</code></li>
+                    <li><code>SHL [value]</code> - Logical Shift Left on <code>EAX</code></li>
+                    <li><code>SHR [value]</code> - Logical Shift Right on <code>EAX</code></li>
+                </ul>
+            </li>
+            <li><strong>Stack & Memory Operations</strong>
+                <ul>
+                    <li><code>STK_PUSH [value]</code> - Push a 32-bit value onto the virtual memory stack</li>
+                    <li><code>STK_POP</code> - Pop top value out from stack layout into <code>EAX</code></li>
+                    <li><code>MOV_AB</code> - Copy data values between system address registers</li>
+                    <li><code>SET_PROT</code> / <code>CLR_PROT</code> - Enable or disable memory segment protection flags</li>
+                    <li><code>WR_GDTB</code> / <code>WR_GDTL</code> - Modify global descriptor table boundaries</li>
+                </ul>
+            </li>
+            <li><strong>Experimental Neural Coprocessor (AI State)</strong>
+                <ul>
+                    <li><code>AI_GEN [value]</code> - Generate chaotic pseudo-random bits mixed inside <code>EDX</code></li>
+                    <li><code>AI_MIX [value]</code> - Intertwine current active registers into <code>EDX</code> matrix mapping</li>
+                    <li><code>AI_FLIP [value]</code> - Invert bit patterns relative to target <code>AI_STATE</code> variables</li>
+                    <li><code>AI_POPCNT</code> - Count active bits inside the <code>AI_STATE</code> registers</li>
+                    <li><code>AI_ROTL</code> - Rotate bits left within the AI processing buffer</li>
+                </ul>
+            </li>
+            <li><strong>Control Flow Instructions</strong>
+                <ul>
+                    <li><code>JZ [value]</code> - Jump execution if Zero Flag condition is met</li>
+                    <li><code>JNZ [value]</code> - Jump execution if Zero Flag condition is false</li>
+                </ul>
+            </li>
+        </ul>
+    </div>
+
+    <div id="titlebar">
+        <div id="minimize"></div>
+        <div id="maximize"></div>
+        <div id="close"></div>
+    </div>
+</body>
+
+</html>
