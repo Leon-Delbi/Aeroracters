@@ -5791,7 +5791,7 @@ const settings = {
 // These suggestion lists mirror server/settings.json (bonziColors / hats /
 // blessedHats). They only feed the autocomplete hints in the Auto Join panel;
 // the server enforces what each rank may actually use, so drift here is harmless.
-const AUTO_NORMAL_COLORS = ["purple", "blue", "magenta", "green", "red", "black", "brown", "maroon", "peedy", "yellow", "cyan", "teal", "indigo", "violet", "pink", "gray", "orange", "white", "brainrotted", "abyss", "jungle"];
+const AUTO_NORMAL_COLORS = ["purple", "blue", "magenta", "green", "red", "black", "brown", "maroon", "peedy", "yellow", "cyan", "teal", "indigo", "violet", "pink", "gray", "orange", "white", "brainrotted", "abyss", "jungle", "richard", "kaipixelleap7800"];
 const AUTO_BLESSED_SKINS = ["angel", "glow", "noob", "gold"];
 const AUTO_POPE_SKINS = ["pope", "radical", "rad", "darllo", "izhan", "jimmy", "greenmsn", "greenpope", "bonzidev"];
 const AUTO_RADICAL_SKINS = ["greenjimmy"];
