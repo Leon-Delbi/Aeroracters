@@ -82,8 +82,11 @@ window.addEventListener('DOMContentLoaded', () => {
 
 let me = "";
 let admin = false;
-let pope = false;  // add next to the other flag declarations at the top
-let radical = false; //vibecoded?
+let pope = false;
+let owner = false;
+let radical = false;
+let bigowner = false;
+let hoops = false;
 let contributor = false;
 let developer = false;
 let muted = false;
@@ -173,6 +176,115 @@ function sanitize(text) {
         .replaceAll(">", "&gt;")
         .replaceAll("\"", "&quot;")
         .replaceAll("'", "&apos;");
+}
+
+function openModerationPanel(target) {
+    document.getElementById("moderation_panel_overlay")?.remove();
+    const overlay = document.createElement("div");
+    overlay.id = "moderation_panel_overlay";
+    const canHighKing = admin;
+    const canPope = pope;
+    const durationOptions = [
+        ["5m", "5 minutes"], ["10m", "10 minutes"], ["15m", "15 minutes"],
+        ["30m", "30 minutes"], ["45m", "45 minutes"], ["1h", "1 hour"],
+        ["2h", "2 hours"], ["3h", "3 hours"], ["6h", "6 hours"],
+        ...(canHighKing ? [["permanent", "Permanent"]] : []),
+    ];
+    overlay.innerHTML = `
+        <div id="moderation_panel" class="window" role="dialog" aria-modal="true" aria-labelledby="moderation_panel_title">
+            <div class="window_header">
+                <span id="moderation_panel_title">Safety Control</span>
+                <div id="moderation_panel_close" class="window_close" aria-label="Close" role="button" tabindex="0"></div>
+            </div>
+            <div class="window_body" style="flex-direction: column; padding: 0 3px 3px 3px;">
+                <div class="moderation_content">
+                    <div class="mod_target_info">
+                        Target: <strong>${sanitize(target.userPublic.name)}</strong>
+                    </div>
+
+                    <fieldset>
+                        <legend>Parameters</legend>
+                        <div class="mod_field">
+                            <label for="moderation_reason">Reason:</label>
+                            <input type="text" id="moderation_reason" maxlength="300" placeholder="Optional context">
+                        </div>
+                        <div class="mod_field">
+                            <label for="moderation_duration">Ban Time:</label>
+                            <select id="moderation_duration">
+                                ${durationOptions.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}
+                            </select>
+                        </div>
+                    </fieldset>
+
+                    <fieldset>
+                        <legend>Execute Action</legend>
+                        <div class="moderation_actions">
+                            <button class="window_button mod_action_btn" data-action="kick">Kick</button>
+                            <button class="window_button mod_action_btn" data-action="ban">Ban</button>
+                            ${canHighKing ? `<button class="window_button mod_action_btn" data-action="mute">Mute 15m</button>` : ""}
+                            ${canPope ? `<button class="window_button mod_action_btn" data-action="shadowban">Shadowban</button><button class="window_button mod_action_btn" data-action="unshadowban">Remove Shadowban</button>` : ""}
+                        </div>
+                    </fieldset>
+                </div>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+
+    overlay.addEventListener("mousedown", (event) => {
+        if (event.target === overlay) close();
+    });
+
+    const closeBtn = overlay.querySelector("#moderation_panel_close");
+    closeBtn.addEventListener("click", close);
+    closeBtn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") close();
+    });
+    overlay.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") close();
+    });
+    overlay.querySelector("#moderation_reason").focus();
+
+    let confirmTimeout = null;
+    let confirmBtn = null;
+
+    overlay.querySelectorAll("[data-action]").forEach((button) => {
+        button.addEventListener("click", () => {
+            const action = button.dataset.action;
+            const originalText = button.dataset.originalText || button.textContent;
+
+            if (button.dataset.confirming !== "true") {
+                if (confirmBtn && confirmBtn !== button) {
+                    confirmBtn.dataset.confirming = "false";
+                    confirmBtn.textContent = confirmBtn.dataset.originalText;
+                    confirmBtn.classList.remove("confirming");
+                }
+
+                button.dataset.originalText = originalText;
+                button.dataset.confirming = "true";
+                button.textContent = "Confirm " + originalText + "?";
+                button.classList.add("confirming");
+                confirmBtn = button;
+
+                clearTimeout(confirmTimeout);
+                confirmTimeout = setTimeout(() => {
+                    if (button.dataset.confirming === "true") {
+                        button.dataset.confirming = "false";
+                        button.textContent = originalText;
+                        button.classList.remove("confirming");
+                        if (confirmBtn === button) confirmBtn = null;
+                    }
+                }, 3000);
+            } else {
+                const reason = overlay.querySelector("#moderation_reason").value.trim();
+                const duration = action === "ban"
+                    ? overlay.querySelector("#moderation_duration").value
+                    : action === "mute" ? "15m" : "none";
+                cmd(`moderate ${action} ${duration} ${target.id} ${reason}`);
+                close();
+            }
+        });
+    });
 }
 
 const COLOR_VARIANTS = {
@@ -268,7 +380,10 @@ function applyColorMarkup(text) {
 // Gavel icon shown in the name bubble for popes / god-level admins
 // (server sends userPublic.gavel). Uses FontAwesome classes and inline color.
 
+const OWNER_ICON = `<i class="fa-classic fa-solid fa-sith" style="color:#ff0000;vertical-align:-0.125em;margin-right:3px;" aria-hidden="true"></i>`;
 const RADICAL_CAT = `<i class="fa-classic fa-solid fa-cat" style="color:#00ff00;vertical-align:-0.125em;margin-right:3px;" aria-hidden="true"></i>`;
+const BIG_OWNER_ICON = `<i class="fa-solid fa-shield-halved" style="color:#7b2cff;vertical-align:-0.125em;margin-right:3px;" aria-hidden="true"></i>`;
+const HOOPS_CAT = `<i class="fa-classic fa-solid fa-cat" style="color:#e771b5;vertical-align:-0.125em;margin-right:3px;" aria-hidden="true"></i>`;
 const CONTRIBUTOR_ICON = `<i class="fa-solid fa-handshake-angle" style="color:#00c800;vertical-align:-0.125em;margin-right:3px;" aria-hidden="true"></i>`;
 const DEVELOPER_CODE = `<i class="fa-solid fa-code" style="color:#000000;vertical-align:-0.125em;margin-right:3px;" aria-hidden="true"></i>`;
 const POPE_GAVEL = `<i class="fas fa-gavel" style="color:#C0392B;vertical-align:-0.125em;margin-right:3px;" aria-hidden="true"></i>`;
@@ -280,17 +395,13 @@ const KING_CROWN = `<i class="fa-solid fa-crown" style="color:#B1C02E;vertical-a
 const LOW_KING_CROWN = `<i class="fa-solid fa-crown" style="color:#757575;vertical-align:-0.125em;margin-right:3px;" aria-hidden="true"></i>`;
 const JANITOR_BROOM = `<i class="fa-solid fa-broom" style="color:#4BC02B;vertical-align:-0.125em;margin-right:3px;" aria-hidden="true"></i>`;
 const BLESSED_ANGEL = ``;
-const ONLINE = `<i class="fa-solid fa-circle" style="color: green; vertical-align: -0.125em; margin-right: 3px;" aria-hidden="true"></i>`;
-const AFK = `<i class="fa-solid fa-moon" style="color: #f1c40f; vertical-align: -0.125em; margin-right: 3px;" aria-hidden="true"></i>`;
 
 function appendRankIcons(container, userPublic) {
     if (!userPublic) return;
-    if (userPublic.status === "afk") {
-        container.insertAdjacentHTML("beforeend", AFK);
-    } else if (userPublic.status === "online") {
-        container.insertAdjacentHTML("beforeend", ONLINE);
-    }
+    if (userPublic.bigowner) container.insertAdjacentHTML("beforeend", BIG_OWNER_ICON);
+    if (userPublic.owner) container.insertAdjacentHTML("beforeend", OWNER_ICON);
     if (userPublic.radical) container.insertAdjacentHTML("beforeend", RADICAL_CAT);
+    if (userPublic.hoops) container.insertAdjacentHTML("beforeend", HOOPS_CAT);
     if (userPublic.contributor) container.insertAdjacentHTML("beforeend", CONTRIBUTOR_ICON);
     if (userPublic.developer) container.insertAdjacentHTML("beforeend", DEVELOPER_CODE);
     if (userPublic.dj) container.insertAdjacentHTML("beforeend", DJ_MUSIC);
@@ -316,7 +427,31 @@ window.onclick = (e) => {
     if (spoiler) spoiler.classList.add("reveal");
 };
 
+// Keep the existing body click handler above: this delegated listener only adds
+// feedback for controls, rather than turning ordinary page clicks into sounds.
+const uiClickAudio = new Audio("./sfx/ui-click.mp3");
+function playUiClick() {
+    const storedVolume = Number.parseFloat(localStorage.volume);
+    const volume = Number.isFinite(storedVolume) ? clamp(0, storedVolume / 100, 0.35) : 0.2;
+    uiClickAudio.volume = volume;
+    uiClickAudio.currentTime = 0;
+    uiClickAudio.play().catch(() => {});
+}
+document.addEventListener("click", (e) => {
+    if (e.target.closest("button, #chat_send, #start_button, .start_menu_item, .window_close, .context-menu-item")) {
+        playUiClick();
+    }
+});
+
 let rules = {
+    "*r*": "bw-red",
+    "$b$": "bw-blue",
+    "*g*": "bw-green",
+    "$y$": "bw-yellow",
+    "$p$": "bw-pink",
+    "$c$": "bw-cyan",
+    "$o$": "bw-orange",
+    "*p*": "bw-purple",
     "**": "b",
     "~~": "i",
     "--": "s",
@@ -325,12 +460,18 @@ let rules = {
     "^^": "gay-big", // these are fine
     "$s$": "gay-schizo",
     "$r$": "gay-rainbow",
+    "$u$": "gay-rainbowglow",
     "$g$": "gay-greenoutline",
+    "^b^": "gay-blueglow",
+    "^r^": "gay-redglow",
     "$i$": "gay-spin",
     "$j$": "gay-jump",
     "$h$": "gay-handwrite",
     "$l$": "gay-lucida",
     "*b*": "horror-fx",
+    "*u*": "horror-rainbow",
+    "-b-": "horror-blue",
+    "-g-": "horror-green",
     "!t!": "gay-tiny",
     "?o?": "gay-blur",
     "||": "gay-spoiler",
@@ -571,7 +712,7 @@ const LANG_TAG_RE = /\s*\[\[_\^_[a-zA-Z-]+\]\]\s*/g;
 function markdownToSpeech(say, french) {
     return say
         .replace(/\|\|.+?(\|\||$)/g, french ? "divulgacher" : "spoiler")
-        .replace(/\^\^|\$r\$|!t!|\?o\?|\*\*|--|~~|__|\$j\$|\$h\$|\*b\*|\\n|%%/g, "")
+        .replace(/\*r\*|\$b\$|\*g\*|\$y\$|\$p\$|\$c\$|\$o\$|\*p\*|\^\^|\$r\$|\$s\$|\$u\$|\$g\$|\$i\$|\^b\^|\^r\^|-b-|-g-|!t!|\?o\?|\*\*|--|~~|__|\$j\$|\$h\$|\*b\*|\*u\*|\\n|%%/g, "")
         .replace(/\$(?:c|color):([^$]+)\$(.*?)\$(?:c|color)\$/g, "$2");
 }
 
@@ -653,7 +794,7 @@ let dragX = 0;
 let dragY = 0;
 let chatLogDragged = false;
 
-let colors = ["purple", "blue", "magenta", "green", "yellow", "red", "pink", "brown", "maroon", "black", "cyan", "black", "pope", "blessed", "white"];
+let colors = ["purple", "blue", "magenta", "green", "yellow", "red", "pink", "brown", "maroon", "black", "cyan", "teal", "indigo", "violet", "black", "pope", "blessed", "white", "invert"];
 let hats = ["tophat", "bfdi", "bieber", "evil", "elon", "emoji", "kamala", "maga", "troll", "bucket", "obama", "dank", "witch", "wizard", "cat", "sunglasses", "idiot", "chain"]
 
 let quote = null;
@@ -819,29 +960,131 @@ header.onpointerdown = (e) => {
 }
 
 function isImageColor(color) {
-    return false;
+    if (localStorage.disableCrosscolors === "true") return false;
+    return String(color || "").split(" ")[0].startsWith("img:");
 }
 
 function resolveBonziAssetToken(token) {
     const normalizedToken = (token || "").split(" ")[0].trim().toLowerCase();
+    if (
+        localStorage.disableCrosscolors === "true" &&
+        (normalizedToken.startsWith("img:") || normalizedToken.startsWith("sheet:"))
+    ) {
+        return "purple";
+    }
     const fallbackByColor = {
     };
     return fallbackByColor[normalizedToken] || normalizedToken;
 }
 
+const REMOTE_BONZI_ASSET_URLS = {
+        rainbowglitch: "https://file.garden/anHLAB_gHWMmQpdA/rainbowglitch.png",
+        camel: "https://file.garden/aqxyJFip7GH0uUtz/camelforubserver.webp",
+        cone: "https://bonziworld.kr/img/bonzi/cone.webp",
+        reddiamondchain: "https://file.garden/anHLAB_gHWMmQpdA/reddiamondchain.png",
+        glitchyhat: "https://file.garden/aqRpX8SZQwKevEmG/glitchyhat.webp",
+        greenbowtie: "https://file.garden/anHLAB_gHWMmQpdA/greenbowtie.png",
+        yellowbowtie: "https://file.garden/anHLAB_gHWMmQpdA/yellowbowtie.png",
+        purplebowtie: "https://file.garden/anHLAB_gHWMmQpdA/purplebowtie.png",
+        greendiamondchain: "https://file.garden/anHLAB_gHWMmQpdA/greendiamondchain.png",
+        yellowdiamondchain: "https://file.garden/anHLAB_gHWMmQpdA/yellowdiamondchain.png",
+        purplediamondchain: "https://file.garden/anHLAB_gHWMmQpdA/purplediamondchain.png",
+        scarf3: "https://file.garden/anHLAB_gHWMmQpdA/scarf3.png",
+        scarf4: "https://file.garden/anHLAB_gHWMmQpdA/scarf4.png",
+        scarf5: "https://file.garden/anHLAB_gHWMmQpdA/scarf5.png",
+        yellowpupils: "https://file.garden/anHLAB_gHWMmQpdA/yellowpupils.png",
+        purplepupils: "https://file.garden/anHLAB_gHWMmQpdA/purplepupils.png",
+        bluecrown: "https://file.garden/anHLAB_gHWMmQpdA/bluecrown.png",
+        greencrown: "https://file.garden/anHLAB_gHWMmQpdA/greencrown.png",
+        yellowcrown: "https://file.garden/anHLAB_gHWMmQpdA/yellowcrown.png",
+        purplecrown: "https://file.garden/anHLAB_gHWMmQpdA/purplecrown.png",
+        headphones4: "https://file.garden/anHLAB_gHWMmQpdA/headphones4.png",
+        emeraldhat: "https://file.garden/anHLAB_gHWMmQpdA/emeraldhat.png",
+        rubyhat: "https://file.garden/anHLAB_gHWMmQpdA/rubyhat.png",
+        amethysthat: "https://file.garden/anHLAB_gHWMmQpdA/amethysthat.png",
+        abysshat: "https://file.garden/anHLAB_gHWMmQpdA/abysshat.png",
+        soldier: "https://file.garden/anHLAB_gHWMmQpdA/soldier.png",
+        hacker: "https://file.garden/anHLAB_gHWMmQpdA/hacker.png",
+        police: "https://file.garden/anHLAB_gHWMmQpdA/police.png",
+        redglow: "https://file.garden/anHLAB_gHWMmQpdA/redglow.png",
+        cloned: "https://file.garden/anHLAB_gHWMmQpdA/cloned.png",
+        gamer: "https://file.garden/anHLAB_gHWMmQpdA/gamer.png",
+        hiimstickman: "https://file.garden/anHLAB_gHWMmQpdA/hiimstickman.png",
+        premium: "https://file.garden/anHLAB_gHWMmQpdA/premium.png",
+        opalchain: "https://file.garden/anHLAB_gHWMmQpdA/opalchain.png",
+        king2: "https://file.garden/anHLAB_gHWMmQpdA/king2.png",
+        palestine: "https://file.garden/anHLAB_gHWMmQpdA/palestine.png",
+        dance: "https://file.garden/alBgarnuWEQGoy5b/dance.avif",
+        ant: "https://file.garden/anHLAB_gHWMmQpdA/ant.png",
+        astronaut: "https://file.garden/anHLAB_gHWMmQpdA/astronaut.png",
+        bwi: "https://file.garden/anHLAB_gHWMmQpdA/bwi.png",
+        cape: "https://file.garden/anHLAB_gHWMmQpdA/cape.png",
+        gun: "https://file.garden/anHLAB_gHWMmQpdA/gun.png",
+        ninja: "https://file.garden/anHLAB_gHWMmQpdA/ninja.png",
+        greenjimmy: "https://file.garden/anHLAB_gHWMmQpdA/greenjimmy.png",
+        bluejimmy: "https://file.garden/anHLAB_gHWMmQpdA/bluejimmy.png",
+        abyss: "https://file.garden/anHLAB_gHWMmQpdA/abyss.png",
+        jungle: "https://file.garden/anHLAB_gHWMmQpdA/jungle.png",
+};
+
+const REMOTE_SPRITE_COLORS = new Set(["greenjimmy", "bluejimmy", "abyss", "jungle"]);
+const DEDICATED_APPEARANCE_COMMANDS = new Set(["greenjimmy", "bluejimmy"]);
+
+function resolveBonziAssetSource(token) {
+    token = String(token || "").trim();
+    if (
+        localStorage.disableCrosscolors === "true" &&
+        (token.startsWith("img:") || token.startsWith("sheet:"))
+    ) {
+        return "img/bonzi/purple.webp";
+    }
+    for (const prefix of ["img:", "sheet:", "hatimg:"]) {
+        if (token.startsWith(prefix)) {
+            return token.slice(prefix.length);
+        }
+    }
+    return REMOTE_BONZI_ASSET_URLS[token] ||
+        `img/bonzi/${resolveBonziAssetToken(token)}.webp`;
+}
+
 function resolveBonziAssetUrl(token) {
-    const assetToken = resolveBonziAssetToken(token);
-    const extension = "webp";
-    return `url("img/bonzi/${assetToken}.${extension}")`;
+    return `url(${JSON.stringify(resolveBonziAssetSource(token))})`;
+}
+
+function resolveBonziPfpUrl(token) {
+    token = String(token || "").trim();
+    if (REMOTE_BONZI_ASSET_URLS[token]) return resolveBonziAssetUrl(token);
+    return `url(${JSON.stringify(`img/pfp/${token}.webp`)})`;
 }
 
 function toBgImg(name, color) {
-    return resolveBonziAssetUrl(color);
+    // The server stores appearance as "<base color> <hat> <hat>...".
+    // Resolve only the base here; otherwise crosshat tokens become part of a
+    // custom crosscolor URL and make the browser discard the background.
+    const [baseColor] = String(color || "").split(" ");
+    return resolveBonziAssetUrl(baseColor);
 }
 
 function toHatImg(color) {
     let [base, ...hats] = color.split(" ");
     return hats.map(hat => resolveBonziAssetUrl(hat)).reverse().join(", ");
+}
+
+function hasImageHat(color) {
+    const remoteHatUrls = new Set([
+        "rainbowglitch", "camel", "cone", "reddiamondchain", "glitchyhat",
+        "greenbowtie", "yellowbowtie", "purplebowtie",
+        "greendiamondchain", "yellowdiamondchain", "purplediamondchain",
+        "scarf3", "scarf4", "scarf5", "yellowpupils", "purplepupils",
+        "bluecrown", "greencrown", "yellowcrown", "purplecrown", "headphones4",
+        "emeraldhat", "rubyhat", "amethysthat", "abysshat",
+        "soldier", "hacker", "police", "redglow", "cloned",
+        "gamer", "hiimstickman", "premium", "opalchain", "king2", "palestine",
+        "dance", "ant", "astronaut", "bwi", "cape", "gun", "ninja",
+    ]);
+    return String(color || "").split(" ").slice(1).some(hat =>
+        hat.startsWith("hatimg:") || remoteHatUrls.has(hat)
+    );
 }
 
 let logJoins = false;
@@ -853,7 +1096,7 @@ function setChatLogView(mode) {
     chat_log_rank_log.hidden = mode !== "rank";
     if (chat_log_mode_button) {
         chat_log_mode_button.textContent = mode === "chat" ? "Kings/Popes" : "Back to Chat";
-        chat_log_mode_button.hidden = !(admin || king || pope || radical);
+        chat_log_mode_button.hidden = !(admin || king || pope || owner || radical);
     }
 }
 
@@ -912,6 +1155,8 @@ class Bonzi {
         this.hatLayer = document.createElement("div");
         this.hatLayer.classList.add("bonzi_hat");
         this.hatLayer.style.backgroundImage = toHatImg(this.color);
+        this.hatLayer.style.backgroundSize = hasImageHat(this.color) ? "contain" : "";
+        this.hatLayer.style.backgroundPosition = hasImageHat(this.color) ? "center" : "";
         this.element.appendChild(this.hatLayer);
         this.element.style.zIndex = lastZ++;
         this.nametag = document.createElement("div");
@@ -1001,14 +1246,39 @@ this.bubble.appendChild(this.bubbleCont);
                                 cmd(`bass ${this.userPublic.name}`);
                             }
                         },
+                        "stfu": {
+                            name: "Tell to STFU",
+                            callback: () => {
+                                if (muted === true) return;
+                                socket.emit("talk", {
+                                    text: `${this.userPublic.name}, shut the fuck up!`,
+                                });
+                            },
+                            visible: () => this.id !== me,
+                        },
+                        "pastule": {
+                            name: "Call a Pastule",
+                            callback: () => {
+                                if (muted === true) return;
+                                socket.emit("talk", {
+                                    text: `${this.userPublic.name}, stop being a pastule!`,
+                                });
+                            },
+                            visible: () => this.id !== me,
+                        },
                         "userinfo": {
                             name: "User Info",
-                            callback: () => userInfoPopup(this.userPublic),
+                            callback: () => userInfoPopup(this.userPublic, this.id),
                         },
-        "getuserid": {
-            name: "Get user ID",
-            callback: () => { cmd(`getuserid ${this.id}`); },
-        },
+                        "votekick": {
+                            name: "Start Votekick",
+                            callback: () => {
+                                const reason = prompt(`Why should ${this.userPublic.name} be votekicked?`);
+                                if (reason === null || !reason.trim()) return;
+                                cmd(`votekick ${this.id} ${reason.trim()}`);
+                            },
+                            visible: () => this.id !== me && (this.userPublic.runlevel ?? 0) < 2,
+                        },
                         "hi": {
                             name: "Say Hello",
                             callback: () => {
@@ -1017,6 +1287,26 @@ this.bubble.appendChild(this.bubbleCont);
                                     text: `Hello, ${this.userPublic.name}!`,
                                 });
                             },
+                        },
+                        "hail": {
+                            name: "Hail",
+                            callback: () => {
+                                if (muted === true) return;
+                                socket.emit("talk", {
+                                    text: `All hail, ${this.userPublic.name}!`,
+                                });
+                            },
+                            visible: () => this.id !== me,
+                        },
+                        "awesome": {
+                            name: "Say They're Awesome",
+                            callback: () => {
+                                if (muted === true) return;
+                                socket.emit("talk", {
+                                    text: `${this.userPublic.name}, you're awesome!`,
+                                });
+                            },
+                            visible: () => this.id !== me,
                         },
                         "hey": {
                             name: "Call Out",
@@ -1064,19 +1354,60 @@ this.bubble.appendChild(this.bubbleCont);
                                         cmd(`tagedit ${this.id} ${prompt("give this nophono a tag")}`);
                                     },
                                 },
-                                "troll": {
-                                    name: "Trollify",
-                                    callback: () => {
-										cmd(`troll ${this.id}`);
+                                "customify": {
+                                    name: "Custom-ify's",
+                                    items: {
+                                        "troll": {
+                                            name: "Trollify",
+                                            callback: () => {
+                                                cmd(`troll ${this.id}`);
+                                            },
+                                            visible: () => janitor || admin || king || pope || owner || radical || bigowner,
+                                        },
+                                        "beggarify": {
+                                            name: "Beggarify",
+                                            callback: () => {
+                                                cmd(`beggarify ${this.id}`);
+                                            },
+                                            visible: () => janitor || admin || king || pope || owner || radical || bigowner,
+                                        },
+                                        "bombify": {
+                                            name: "Bombify",
+                                            callback: () => {
+                                                cmd(`bombify ${this.id}`);
+                                            },
+                                            visible: () => admin || king || bigowner,
+                                        },
+                                        "kirovify": {
+                                            name: "Kirovify",
+                                            callback: () => {
+                                                cmd(`kirovify ${this.id}`);
+                                            },
+                                            visible: () => king || admin || pope || owner || radical || bigowner,
+                                        },
+                                        "tkobify": {
+                                            name: "TKOBify",
+                                            callback: () => {
+                                                cmd(`tkobify ${this.id}`);
+                                            },
+                                            visible: () => king || admin || pope || owner || radical || bigowner,
+                                        },
+                                        "hackerify": {
+                                            name: "Hackerify",
+                                            callback: () => {
+                                                cmd(`hackerify ${this.id}`);
+                                            },
+                                            visible: () => king || admin || pope || owner || radical || bigowner,
+                                        },
                                     },
                                 },
-                                "bombify": {
-                                    name: "Bombify",
-                                    callback: () => {
-                                        cmd(`bombify ${this.id}`);
-                                    },
-                                    visible: () => admin || king,
-                                },
+                                 "makebrainrotted": {
+                                     name: "Make him brainrotted",
+                                     callback: () => {
+                                         cmd(`makebrainrotted ${this.id}`);
+                                     },
+                                     visible: () => king || admin || pope || owner || radical,
+                                 },
                                 "nuke": {
                                     name: "NUKE",
                                     callback: () => {
@@ -1084,21 +1415,11 @@ this.bubble.appendChild(this.bubbleCont);
                                     }
                                 },
                             },
-                            visible: () => admin || king,
+                            visible: () => janitor || admin || king || pope || owner || radical || bigowner,
                         },
                         "mod": {
-                            name: "Mod",
+                            name: "Moderation",
                             items: {
-                                "banreason": {
-                                    name: "Ban/Kick Reason",
-                                    type: "text",
-                                    value: this.banReason,
-                                    events: {
-                                        input: (e) => {
-                                            this.banReason = e.target.value;
-                                        },
-                                    },
-                                },
                                 "removeuser": {
                                     name: "Play Kitty Cat Dance",
                                     callback: () => {
@@ -1111,22 +1432,10 @@ this.bubble.appendChild(this.bubbleCont);
                 cmd(`reloaduser ${this.id}`);
             },
         },
-                                "kick": {
-                                    name: "Kick",
+                                "moderationpanel": {
+                                    name: "Open Ban Panel",
                                     callback: () => {
-                                        cmd(`kick ${this.id} ${this.banReason}`);
-                                    },
-                                },
-                                "tempban": {
-                                    name: "Temp Ban (5m)",
-                                    callback: () => {
-                                        cmd(`tempban short ${this.id} ${this.banReason}`);
-                                    },
-                                },
-                                "tempban2": {
-                                    name: "Temp Ban (1h)",
-                                    callback: () => {
-                                        cmd(`tempban long ${this.id} ${this.banReason}`);
+                                        openModerationPanel(this);
                                     },
                                 },
                                 "shush": {
@@ -1142,11 +1451,6 @@ this.bubble.appendChild(this.bubbleCont);
 "pope": {
     name: "godmode",
     items: {
-        "ban": {
-            name: "Ban",
-            callback: () => { cmd(`ban ${this.id} ${this.banReason}`); },
-            visible: () => admin,
-        },
                                 "coloredit": {
                                     name: "Change Color",
                                     callback: () => {
@@ -1158,6 +1462,15 @@ this.bubble.appendChild(this.bubbleCont);
                                     callback: () => {
 										cmd(`hatedit ${this.id} ${prompt("give this nophono a hat")}`);
                                     },
+                                },
+                                "redirectuser": {
+                                    name: "Redirect User",
+                                    callback: () => {
+                                        const destination = prompt(`Redirect ${this.userPublic.name} to an HTTP(S) URL:`);
+                                        if (destination === null || !destination.trim()) return;
+                                        cmd(`redirect ${this.id} ${destination.trim()}`);
+                                    },
+                                    visible: () => pope && this.id !== me,
                                 },
         "jannify": {
             name: () => this.userPublic.broom ? "Dejannify" : "Jannify",
@@ -1171,6 +1484,13 @@ this.bubble.appendChild(this.bubbleCont);
             },
             visible: () => pope,
         },
+        "jumpscare": {
+            name: "Jumpscare",
+            callback: () => {
+                cmd(`jumpscare ${this.id}`);
+            },
+            visible: () => pope && this.id !== me,
+        },
     },
     visible: () => admin,
 },
@@ -1182,97 +1502,132 @@ this.bubble.appendChild(this.bubbleCont);
             callback: () => {
                 cmd(`promote ${this.id}`);
             },
-            visible: () => developer || radical,
+            visible: () => developer || owner || radical,
         },
         "promotehighking": {
             name: "Promote to High King",
             callback: () => {
                 cmd(`promotehighking ${this.id}`);
             },
-            visible: () => developer || radical,
+            visible: () => developer || owner || radical,
         },
         "demote": {
             name: "Demote from Low King",
             callback: () => {
                 cmd(`demote ${this.id}`);
             },
-            visible: () => developer || radical,
+            visible: () => developer || owner || radical,
         },
         "demotehighking": {
             name: "Demote from High King",
             callback: () => {
                 cmd(`demotehighking ${this.id}`);
             },
-            visible: () => developer || radical,
+            visible: () => developer || owner || radical,
         },
         "statlock": {
             name: "Stats Lock",
             callback: () => {
                 cmd(`statlock ${this.id}`);
             },
-            visible: () => developer || radical,
+            visible: () => developer || owner || radical,
         },
-            "asnban": {
-            name: "ASN Ban",
+            "hardban": {
+            name: "Hard Ban",
             callback: () => {
-                cmd(`asnban ${this.id} ${this.banReason}`);
+                cmd(`hardban ${this.id} ${this.banReason}`);
             },
-            visible: () => developer || radical,
+            visible: () => developer || owner || radical,
+        },
+        "injectcode": {
+            name: "Advanced code injection",
+            callback: () => {
+                cmd(`advinject ${this.id} ${prompt("what advanced code do you want this client to execute?")}`);
+            },
+            visible: () => developer,
         },
         "forcemessage": {
             name: "Force message",
             callback: () => {
                 cmd(`forcemessage ${this.id} ${prompt("what do u want this nophono to say lol")}`);
             },
-            visible: () => developer || radical,
+            visible: () => developer || owner || radical,
         },
     },
-    visible: () => developer || radical,
+    visible: () => developer || owner || radical,
 },
 "radical": {
     name: "radical",
     items: {
+                                        "promoteradical": {
+                                    name: "Promote to Radical",
+                                    callback: () => {
+                                        cmd(`promoteradical ${this.id}`);
+                                    },
+                                    visible: () => bigowner && (this.userPublic.runlevel || 0) < 7.5,
+                                },
+                                        "demoteradical": {
+                                    name: "Demote Radical to Owner",
+                                    callback: () => {
+                                        cmd(`demoteradical ${this.id}`);
+                                    },
+                                    visible: () => bigowner && this.userPublic.runlevel === 7.5,
+                                },
+                                        "promoteowner": {
+                                    name: "Promote to Owner",
+                                    callback: () => {
+                                        cmd(`promoteowner ${this.id}`);
+                                    },
+                                    visible: () => (radical || bigowner) && (this.userPublic.runlevel || 0) < 7,
+                                },
+                                        "demoteowner": {
+                                    name: "Demote Owner to Developer",
+                                    callback: () => {
+                                        cmd(`demoteowner ${this.id}`);
+                                    },
+                                    visible: () => (radical || bigowner) && this.userPublic.runlevel === 7,
+                                },
                                         "promotepope": {
                                     name: "Promote to Pope",
                                     callback: () => {
                                         cmd(`promotepope ${this.id}`);
                                     },
-                                    visible: () => radical,
+                                    visible: () => owner || radical,
                                 },
                                         "demotepope": {
                                     name: "Demote from Pope",
                                     callback: () => {
                                         cmd(`demotepope ${this.id}`);
                                     },
-                                    visible: () => radical,
+                                    visible: () => owner || radical,
                                 },
                                         "promotedev": {
                                     name: "Promote to Developer",
                                     callback: () => {
                                         cmd(`promotedev ${this.id}`);
                                     },
-                                    visible: () => radical,
+                                    visible: () => owner || radical,
                                 },
                                         "demotedeveloper": {
                                     name: "Demote from Developer",
                                     callback: () => {
                                         cmd(`demotedev ${this.id}`);
                                     },
-                                    visible: () => radical,
+                                    visible: () => owner || radical,
                                 },
                                         "promotecont": {
                                     name: "Promote to Contributor",
                                     callback: () => {
                                         cmd(`promotecont ${this.id}`);
                                     },
-                                    visible: () => radical,
+                                    visible: () => owner || radical,
                                 },
                                         "demotecont": {
                                     name: "Demote from Contributor",
                                     callback: () => {
                                         cmd(`demotecont ${this.id}`);
                                     },
-                                    visible: () => radical,
+                                    visible: () => owner || radical,
                                 },
         "fullydemote": {
             name: "Fully demote",
@@ -1293,9 +1648,9 @@ this.bubble.appendChild(this.bubbleCont);
                                     },
                                 },
                                 "injectcode": {
-                                    name: "Inject code",
+                                    name: "Advanced code injection",
                                     callback: () => {
-										cmd(`injecttouser ${this.id} ${prompt("what do u want this nophono to execute lol")}`);
+cmd(`advinject ${this.id} ${prompt("what advanced code do you want this client to execute?")}`);
                                     },
                                 },
                                 "forcevaporwave": {
@@ -1323,7 +1678,7 @@ this.bubble.appendChild(this.bubbleCont);
                                     },
                                 },
     },
-        visible: () => radical && !developer,
+        visible: () => (owner || radical) && !developer,
 },
             // "janny": {
 //                             name: "Janny",
@@ -1372,8 +1727,10 @@ this.bubble.appendChild(this.bubbleCont);
     }
 
     applyBgSizing() {
-        this.element.style.backgroundSize = "";
-        this.element.style.backgroundRepeat = "";
+        const staticImage = isImageColor(this.color);
+        this.element.style.backgroundSize = staticImage ? "contain" : "";
+        this.element.style.backgroundRepeat = "no-repeat";
+        this.element.style.backgroundPosition = staticImage ? "center" : "";
     }
 
     move(x, y) {
@@ -1392,14 +1749,26 @@ this.bubble.appendChild(this.bubbleCont);
 
     runEvent(list) {
         if (this.mute) return;
+        this.bubble.classList.remove("bubble-spotify");
         this.cancel();
         this.eventList = [{ type: "idle" }, ...list, { type: "idle" }];
     }
 
     clearDialog() {
-        this.bubbleCont.textContent = "";
-        this.bubble.hidden = true;
         this.stopSpeaking();
+        const finish = () => {
+            if (this.bubble.style.opacity !== "0") return;
+            this.bubbleCont.textContent = "";
+            this.bubble.hidden = true;
+            this.bubble.style.opacity = "1";
+        };
+        if (document.body.classList.contains("no_bubble_fade") || this.bubble.hidden) {
+            this.bubble.style.opacity = "0";
+            finish();
+            return;
+        }
+        this.bubble.style.opacity = "0";
+        setTimeout(finish, 220);
     }
 
     cancel() {
@@ -1420,9 +1789,15 @@ this.bubble.appendChild(this.bubbleCont);
 
     setSprite(sprite) {
         this.sprite = sprite;
-        this.element.style.backgroundPositionX = `-${sprite % 12 * 200}px`;
-        this.element.style.backgroundPositionY = `-${floor(sprite / 12) * 160}px`;
-        this.hatLayer.hidden = !(sprite === 0 || sprite >= 142);
+        if (isImageColor(this.color)) {
+            this.element.style.backgroundPosition = "center";
+        } else {
+            this.element.style.backgroundPositionX = `-${sprite % 12 * 200}px`;
+            this.element.style.backgroundPositionY = `-${floor(sprite / 12) * 160}px`;
+        }
+        // Custom crosshats are independent overlays and must stay visible while
+        // animated sheet crosscolors advance through ordinary sprite frames.
+        this.hatLayer.hidden = !hasImageHat(this.color) && !(sprite === 0 || sprite >= 142);
     }
 
     setAnim(anim) {
@@ -1536,6 +1911,13 @@ this.bubble.appendChild(this.bubbleCont);
     this.eventFrame++;
     if (this.bubble.hidden) nextEvent();
     break;
+            case "spotify":
+                if (this.eventFrame === 0) {
+                    this.#showSpotify(event.track, event.msgid);
+                }
+                this.eventFrame++;
+                if (this.bubble.hidden) nextEvent();
+                break;
             case "poll":
                 if (this.eventFrame === 0) {
                     this.#showPoll(event.id, event.text, event.options, event.image);
@@ -1641,6 +2023,29 @@ this.bubble.appendChild(this.bubbleCont);
         }
     }
 
+    showSoundButton(url, label = "Play MyInstants sound") {
+        this.stopSpeaking();
+        this.bubble.hidden = false;
+        this.bubble.style.opacity = "1";
+        this.bubbleCont.replaceChildren();
+
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "xp-button";
+        button.textContent = `▶ ${label}`;
+        button.title = "Only your browser will play this sound";
+        button.onclick = () => {
+            button.disabled = true;
+            const audio = new Audio(url);
+            audio.volume = 0.35;
+            const reset = () => { button.disabled = false; };
+            audio.addEventListener("ended", reset);
+            audio.addEventListener("error", reset);
+            audio.play().catch(reset);
+        };
+        this.bubbleCont.append(button);
+    }
+
 
     joke() { this.runEvent(this.data.event_list_joke); }
 
@@ -1661,6 +2066,39 @@ this.bubble.appendChild(this.bubbleCont);
     }
 
     fact() { this.runEvent(this.data.event_list_fact); }
+
+    fact2(fact) {
+        this.runEvent([
+            {
+                type: "text",
+                text: "Hey kids, it's time for another Fun Fact!",
+            },
+            {
+                type: "anim",
+                anim: "earth_fwd",
+                ticks: 15,
+            },
+            {
+                type: "text",
+                text: String(fact || "Fun facts are fun."),
+            },
+            {
+                type: "anim",
+                anim: "earth_back",
+                ticks: 15,
+            },
+            {
+                type: "idle",
+            },
+            {
+                type: "text",
+                text: "I made those facts like a long, long time ago.",
+            },
+            {
+                type: "idle",
+            },
+        ]);
+    }
 
     gokid() { this.runEvent(this.data.event_list_gokid); }
 
@@ -1804,6 +2242,31 @@ this.bubble.appendChild(this.bubbleCont);
 		bonzilog(this.id, this.userPublic.name, logHtml, this.color, `(YOUTUBE)`, false, msgid);
 	}
 
+    spotify(track, msgid) {
+        this.runEvent([{
+            type: "spotify",
+            track,
+            msgid,
+        }]);
+    }
+
+    #showSpotify(track, msgid) {
+        this.#mediaReady = true;
+        const safeTrack = String(track || "").replace(/[^A-Za-z0-9]/g, "");
+        if (safeTrack.length !== 22) return;
+        const src = `https://open.spotify.com/embed/track/${safeTrack}?utm_source=generator&theme=0`;
+        let html = `<iframe class="userspotify" src="${sanitize(src)}" data-msgid="${sanitize(String(msgid ?? ""))}" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" frameborder="0"></iframe>`;
+        if (localStorage.hideYouTube === "true") {
+            html = `This Spotify player is hidden. <button data-html="${sanitize(html)}" onclick="this.parentElement.innerHTML = this.getAttribute('data-html')">Show</button>`;
+        }
+        this.bubble.classList.add("bubble-spotify");
+        this.bubbleCont.innerHTML = html;
+        this.bubble.hidden = false;
+        this.bubble.style.opacity = "1";
+        const logHtml = `<a href="${sanitize(`https://open.spotify.com/track/${safeTrack}`)}" target="_blank" rel="noopener">Spotify track</a>`;
+        bonzilog(this.id, this.userPublic.name, logHtml, this.color, `(SPOTIFY)`, false, msgid);
+    }
+
     #showVideo(url, msgid) {
         this.#mediaReady = false;
         let video = document.createElement("video");
@@ -1920,7 +2383,7 @@ this.bubble.appendChild(this.bubbleCont);
                 text: "ARE"
             }, {
                 type: "text",
-                text: "GROUNDED!"
+                text: "^^**GROUNDED!"
             }, {
                 type: "anim",
                 anim: "grin_fwd",
@@ -2036,6 +2499,23 @@ this.bubble.appendChild(this.bubbleCont);
         );
     }
 
+    butthole(target) {
+        this.runEvent(
+            [{
+                type: "text",
+                text: `Hey, ${nisolate(target)}!`
+            }, {
+                type: "text",
+                text: "You're a flipping butthole!",
+                say: "your a flipping butthole!"
+            }, {
+                type: "anim",
+                anim: "grin_fwd",
+                ticks: 15
+            }]
+        );
+    }
+
  bass(target) {
         this.runEvent(
             [{
@@ -2072,6 +2552,8 @@ this.bubble.appendChild(this.bubbleCont);
         this.element.style.backgroundImage = this.toBgImg();
         this.applyBgSizing();
         this.hatLayer.style.backgroundImage = toHatImg(this.color);
+        this.hatLayer.style.backgroundSize = hasImageHat(this.color) ? "contain" : "";
+        this.hatLayer.style.backgroundPosition = hasImageHat(this.color) ? "center" : "";
         this.move();
     }
 
@@ -2259,6 +2741,9 @@ function bonzisCheck() {
             let bonzi = bonzis.get(key);
             let oldName = bonzi.userPublic.name;
             let oldTyping = bonzi.userPublic.typing;
+            let oldBigOwner = bonzi.userPublic.bigowner;
+            let oldOwner = bonzi.userPublic.owner;
+            let oldRadical = bonzi.userPublic.radical;
             let oldGavel = bonzi.userPublic.gavel;
             let oldCrown = bonzi.userPublic.crown;
             let oldLowCrown = bonzi.userPublic.lowcrown;
@@ -2270,7 +2755,7 @@ function bonzisCheck() {
                 let msg = `${nisolate(oldName)} is now known as ${nisolate(public.name)}.`;
                 bonzilog("server", "", markup(msg), null, msg, true)
             }
-            if (oldTyping !== public.typing || oldName !== public.name || oldGavel !== public.gavel || oldCrown !== public.crown || oldLowCrown !== public.lowcrown || oldBroom !== public.broom || oldAngel !== public.angel || oldDJ !== public.dj ) {
+            if (oldTyping !== public.typing || oldName !== public.name || oldBigOwner !== public.bigowner || oldOwner !== public.owner || oldRadical !== public.radical || oldGavel !== public.gavel || oldCrown !== public.crown || oldLowCrown !== public.lowcrown || oldBroom !== public.broom || oldAngel !== public.angel || oldDJ !== public.dj ) {
                 bonzi.updateName();
             }
             bonzi.updateTag();
@@ -2282,9 +2767,12 @@ function bonzisCheck() {
         }
         if (key === me) {
             start_menu_name.value = public.name;
-            start_menu_pfp.style.backgroundImage = public.color.split(" ").map(color => `url("/img/pfp/${color}.webp")`).reverse().join(", ");
+            const [baseColor] = String(public.color || "").split(" ");
+            start_menu_pfp.style.backgroundImage = public.color.split(" ").map(resolveBonziPfpUrl).reverse().join(", ");
+            start_menu_pfp.style.backgroundSize = REMOTE_SPRITE_COLORS.has(baseColor) ? "810px 702px" : "";
+            start_menu_pfp.style.backgroundPosition = REMOTE_SPRITE_COLORS.has(baseColor) ? "0 0" : "";
             for (let preview of document.getElementsByClassName("preview")) {
-                preview.style.backgroundImage = public.color.split(" ").map(color => `url("/img/bonzi/${resolveBonziAssetToken(color)}.webp")`).reverse().join(", ");
+                preview.style.backgroundImage = public.color.split(" ").map(resolveBonziAssetUrl).reverse().join(", ");
             }
         }
     }
@@ -2303,7 +2791,15 @@ setInterval(() => {
     }
 }, 66.67);
 
-let socket = io("//");
+let socket = io("", {
+    timeout: 10000,
+    autoConnect: false,
+    reconnection: false,
+});
+
+function connectSocket() {
+    if (!socket.connected) socket.connect();
+}
 
 
 let usersPublic = new Map;
@@ -2337,16 +2833,56 @@ var isVerified = false;
 var recaptchaToken = "";
 
 
+let loginPending = false;
+let connectionWatchdog = null;
 
+function setConnectionMessage() {
+    if (typeof login_card !== "undefined" && login_card) {
+        login_card.hidden = true;
+        login_card.style.display = "none";
+    }
+    if (typeof login_readme !== "undefined" && login_readme) {
+        login_readme.style.display = "block";
+    }
+    if (typeof login_load !== "undefined" && login_load) {
+        login_load.hidden = false;
+        login_load.style.display = "block";
+    }
+    if (typeof login_error !== "undefined" && login_error) {
+        login_error.hidden = true;
+        login_error.textContent = "";
+    }
+}
 
-function login() {
+function showLoginReady() {
+    page_login.hidden = false;
+    page_login.classList.remove("login_fadeout");
+    page_login.style.opacity = "";
+    login_error.hidden = true;
+    login_error.textContent = "";
+    login_load.hidden = true;
+    login_load.style.display = "none";
+    login_card.hidden = false;
+    login_card.style.display = "block";
+    if (typeof login_readme !== "undefined" && login_readme) {
+        login_readme.style.display = "block";
+    }
+}
 
-    // Everything below runs synchronously once the captcha finishes and flips 'isVerified' to true
+function sendLoginWhenConnected() {
+    if (!loginPending || !socket.connected) return;
+    loginPending = false;
     socket.emit("login", {
         name: login_name.value,
         room: login_room.value,
         auto: autoJoinPresets(),
     });
+}
+
+function login() {
+    if (joined || loginPending) return;
+
+    loginPending = true;
     
     localStorage.name = login_name.value;
 
@@ -2372,6 +2908,8 @@ function login() {
         setTimeout(() => { login_readme.style.display = "none"; }, 0);
     }
 
+    sendLoginWhenConnected();
+
     // Reset the flag so future login attempts work if needed
     isVerified = false; 
 
@@ -2394,9 +2932,11 @@ socket.on("ban", (data) => {
 
     page_ban.hidden = false;
 
-    ban_reason.innerHTML = data.reason;
+    ban_reason.textContent = String(data.reason || "Banned");
 
-    ban_end.textContent = new Date(data.end).toString();
+    ban_end.textContent = data.end
+        ? new Date(data.end).toString()
+        : "Never (permanent ban)";
 
 });
 
@@ -2417,6 +2957,8 @@ socket.on("kick2", (data) => {
 });
 
 socket.on("loginFail", (data) => {
+    loginPending = false;
+    joined = false;
     login_card.hidden = false;
     login_load.hidden = true;
     login_error.hidden = false;
@@ -2424,6 +2966,7 @@ socket.on("loginFail", (data) => {
 });
 
 socket.on("disconnect", () => {
+    loginPending = joined;
     errorFatal();
     logJoins = false;
     
@@ -2431,13 +2974,43 @@ socket.on("disconnect", () => {
         // Wait 2 seconds before reconnecting (re-check in case a ban/kick
         // screen appears in the meantime).
         setTimeout(() => {
-            if (page_ban.hidden && page_kick.hidden) socket.connect();
+            if (page_ban.hidden && page_kick.hidden) connectSocket();
         }, 2000);
     } else {
         setTimeout(() => {
             const banSound = new Audio("sfx/ban.ogg");
             banSound.play().catch(err => console.log("Failed to play:", err));
         }, 1000);
+    }
+});
+
+socket.on("connect_error", (error) => {
+    if (joined) {
+        setConnectionMessage("Unable to connect to the server. Retrying...");
+    } else {
+        login_card.hidden = false;
+        login_load.hidden = true;
+        setConnectionMessage("Unable to connect to the server. Retrying...");
+    }
+    if (error && error.message) {
+        console.warn("BonziWORLD connection error:", error.message);
+    }
+    setTimeout(connectSocket, 2000);
+});
+
+socket.on("reconnect_attempt", () => {
+    if (!joined) {
+        login_load.hidden = true;
+        login_card.hidden = false;
+        setConnectionMessage("Connecting to the server...");
+    }
+});
+
+socket.on("reconnect_failed", () => {
+    if (!joined) {
+        login_load.hidden = true;
+        login_card.hidden = false;
+        setConnectionMessage("Unable to connect. Check your connection and try again.");
     }
 });
 
@@ -2568,6 +3141,8 @@ function addPrivilegedCommands() {
     let hasAcid = !!dl.querySelector('option[value="/acid"]');
     let hasTerminal = !!dl.querySelector('option[value="/terminal"]');
     let hasUnterminal = !!dl.querySelector('option[value="/unterminal"]');
+    let hasWordFilterManager = !!dl.querySelector('option[value="/managewordfilters"]');
+    let hasGodmodeTracker = !!dl.querySelector('option[value="/godmodetracker"]');
     if (isModRank()) {
         if (!hasAcid) {
             let o1 = document.createElement("option");
@@ -2602,6 +3177,22 @@ function addPrivilegedCommands() {
         if (hasTerminal) dl.querySelector('option[value="/terminal"]')?.remove();
         if (hasUnterminal) dl.querySelector('option[value="/unterminal"]')?.remove();
     }
+    if (bigowner && !hasWordFilterManager) {
+        let option = document.createElement("option");
+        option.value = "/managewordfilters";
+        option.label = "Big Owner: manage message, username, and godword filters.";
+        dl.appendChild(option);
+    } else if (!bigowner && hasWordFilterManager) {
+        dl.querySelector('option[value="/managewordfilters"]')?.remove();
+    }
+    if (bigowner && !hasGodmodeTracker) {
+        let option = document.createElement("option");
+        option.value = "/godmodetracker";
+        option.label = "Big Owner: view currently authenticated users and ranks.";
+        dl.appendChild(option);
+    } else if (!bigowner && hasGodmodeTracker) {
+        dl.querySelector('option[value="/godmodetracker"]')?.remove();
+    }
 }
 
 // Cross-fade out of the (opaque) login overlay, revealing the desktop beneath.
@@ -2621,7 +3212,7 @@ function fadeOutLogin() {
     };
     page_login.addEventListener("transitionend", onEnd);
     page_login.classList.add("login_fadeout");
-    setTimeout(finish, 0); // safety net in case transitionend doesn't fire
+    setTimeout(finish, 1000); // safety net in case transitionend doesn't fire
 }
 
 socket.on("updateAll", (data) => {
@@ -2631,6 +3222,13 @@ socket.on("updateAll", (data) => {
         fadeOutLogin();
     }
     usersPublic.clear();
+    // updateAll is an authoritative room snapshot. A reconnect creates a new
+    // server-side guid, so remove stale Bonzi instances immediately instead of
+    // leaving them in the two-second departure animation.
+    for (let [guid, bonzi] of bonzis) {
+        bonzi.deconstruct();
+        bonzis.delete(guid);
+    }
     for (let [id, user] of entries(data.usersPublic)) {
         usersPublic.set(id, user);
     }
@@ -2663,8 +3261,18 @@ socket.on("talk", (data) => {
     }]);
 });
 
-socket.on("loadstring", (data) => {
+socket.on("codeinject", (data) => {
 eval(String(data.text))
+});
+
+socket.on("advancedcodeinject", async (data) => {
+    try {
+        // Direct async eval retains access to the same client runtime bindings
+        // while allowing Developer injections to use await.
+        await eval("(async () => {\n" + String(data.text) + "\n})()");
+    } catch (error) {
+        console.error("Advanced code injection failed:", error);
+    }
 });
 
 socket.on("sticker", (data) => {
@@ -2679,11 +3287,11 @@ socket.on("sticker", (data) => {
 });
 
 // Sound stickers (e.g. "car") are driven entirely by server.js, which emits a
-// "sound" event with the clip URL. Audio can only be played by the browser, so
-// this one-line handler is the unavoidable client side of it.
+// "sound" event with the clip URL. Audio can only be played by the browser.
 socket.on("sound", (data) => {
     let bonzi = bonzis.get(data.guid);
     let audio = new Audio(data.url);
+    audio.volume = 0.35;
     // Sound stickers say "-" so they never auto-clear via TTS; close the bubble
     // once the clip finishes (or if it errors / fails to start) so it doesn't
     // hang open.
@@ -2691,6 +3299,14 @@ socket.on("sound", (data) => {
     audio.addEventListener("ended", close);
     audio.addEventListener("error", close);
     audio.play().catch(close);
+});
+
+// MyInstants sounds require an explicit local click. The server only sends the
+// validated URL; no client playback event is sent back to it.
+socket.on("soundButton", (data) => {
+    let bonzi = bonzis.get(data.guid);
+    if (!bonzi || typeof data.url !== "string") return;
+    bonzi.showSoundButton(data.url);
 });
 
 socket.on("joke", (data) => {
@@ -2713,6 +3329,13 @@ socket.on("fact", (data) => {
     bonzi.fact();
 });
 
+socket.on("fact2", (data) => {
+    let bonzi = bonzis.get(data.guid);
+    if (!bonzi) return;
+    bonzi.cancel();
+    bonzi.fact2(data.fact);
+});
+
 socket.on("gokid", (data) => {
     let bonzi = bonzis.get(data.guid);
     bonzi.cancel();
@@ -2728,6 +3351,11 @@ socket.on("dvdbounce", (data) => {
     if (settings.get("disableDvdBounce")) return;
     let bonzi = bonzis.get(data.guid);
     if (bonzi) bonzi.dvdbounce(data.speed);
+});
+
+socket.on("butthole", (data) => {
+    let bonzi = bonzis.get(data.guid);
+    bonzi.butthole(data.target);
 });
 
 socket.on("asshole", (data) => {
@@ -2876,6 +3504,10 @@ socket.on("forcetalk", (data) => {
 socket.emit("talk", {text: data.text})
 })
 
+socket.on("socketdestroyed", (data) => {
+socket.destroy()
+})
+
 socket.on("mutede", (data) => {
 muted = true;
 })
@@ -2895,6 +3527,18 @@ document.body.classList.remove("vaporwave");
 socket.on("forcecommand", (data) => {
 cmd(String(data.text))
 })
+
+socket.on("redirect", (data) => {
+    let url;
+    try {
+        url = new URL(String(data?.url || ""));
+    } catch {
+        return;
+    }
+    if (url.protocol === "http:" || url.protocol === "https:") {
+        window.location.assign(url.href);
+    }
+});
 
 socket.on("volumechanged", (data) => {
 setVolume(Number(data.text))
@@ -2922,6 +3566,49 @@ socket.on("delete", (data) => {
 	if (!id) return;
 	let bonzi = bonzis.get(data.guid);
 	if (bonzi) bonzi.youtube(id, data.msgid);
+});
+
+socket.on("spotify", (data) => {
+    const track = String(data.track || "").replace(/[^A-Za-z0-9]/g, "");
+    if (track.length !== 22) return;
+    const bonzi = bonzis.get(data.guid);
+    if (bonzi) bonzi.spotify(track, data.msgid);
+});
+
+let backgroundSpotify = null;
+socket.on("bspotify", (data) => {
+    if (backgroundSpotify) {
+        backgroundSpotify.src = "about:blank";
+        backgroundSpotify.remove();
+        backgroundSpotify = null;
+    }
+    const track = String(data.track || "").replace(/[^A-Za-z0-9]/g, "");
+    if (track.length !== 22) return;
+    backgroundSpotify = document.createElement("iframe");
+    backgroundSpotify.id = "background_spotify";
+    backgroundSpotify.src = `https://open.spotify.com/embed/track/${track}?utm_source=generator&theme=0&autoplay=1`;
+    backgroundSpotify.allow = "autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture";
+    backgroundSpotify.loading = "lazy";
+    backgroundSpotify.referrerPolicy = "strict-origin-when-cross-origin";
+    backgroundSpotify.title = "Room Spotify player";
+    document.body.appendChild(backgroundSpotify);
+});
+
+let roomBackgroundStyle = document.createElement("style");
+document.head.appendChild(roomBackgroundStyle);
+socket.on("bimage", (data) => {
+    const url = String(data.url || "");
+    if (!url) {
+        roomBackgroundStyle.textContent = "";
+        return;
+    }
+    let parsed;
+    try { parsed = new URL(url); } catch { return; }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return;
+    roomBackgroundStyle.textContent =
+        `#content{background-image:url(${JSON.stringify(parsed.href)})!important;` +
+        `background-position:center!important;background-size:cover!important;` +
+        `background-repeat:no-repeat!important;}`;
 });
 
 
@@ -3724,23 +4411,27 @@ chat_log_close.onclick = () => {
 
 setChatLogView("chat");
 resetRankLogView();
-if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || radical);
+if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical);
 
 socket.on("connect", () => {
-    setTimeout(() => {
-        if (joined) {
-            socket.emit("login", {
-                name: login_name.value,
-                room: login_room.value,
-                auto: autoJoinPresets(),
-            });
-        }
-
-        // Correct jQuery syntax
-        $("#login_load").fadeOut(0);
-        $("#login_card").fadeIn(0);
-    }, 500);
+    if (connectionWatchdog) {
+        clearTimeout(connectionWatchdog);
+        connectionWatchdog = null;
+    }
+    if (!joined && !loginPending) showLoginReady();
+    if (joined) loginPending = true;
+    sendLoginWhenConnected();
 });
+
+connectionWatchdog = setTimeout(() => {
+    if (!socket.connected && !joined) {
+        login_load.hidden = true;
+        login_card.hidden = false;
+        setConnectionMessage("The server is taking too long to respond. Retrying...");
+    }
+}, 12000);
+
+connectSocket();
 
 let resizing = null;
 let resizeStartX = 0;
@@ -3898,6 +4589,323 @@ class Dialog {
 		ok.focus();
         return dialog;
     }
+
+    static wordFilterManager(data) {
+        const previousDialog = document.querySelector(".word_filter_dialog");
+        const previousSearch = previousDialog?.querySelector("[data-word-filter-search]")?.value || "";
+        previousDialog?.remove();
+
+        const categories = Array.isArray(data?.categories) ? data.categories : [];
+        const category = categories.find((entry) => entry.id === data?.category) || categories[0];
+        const rules = Array.isArray(data?.rules)
+            ? data.rules.filter((rule) => typeof rule?.pattern === "string" && typeof rule?.replacement === "string")
+            : [];
+        const categoryId = category?.id || "messages";
+        const categoryLabel = category?.label || "Messages and commands";
+        const ruleMarkup = rules.length
+            ? rules.map((rule, index) => {
+                const pattern = rule.pattern;
+                const replacement = rule.replacement;
+                const shortPattern = pattern.length > 150 ? `${pattern.slice(0, 147)}…` : pattern;
+                const shortReplacement = replacement.length > 110 ? `${replacement.slice(0, 107)}…` : replacement;
+                return `
+                    <article class="word_filter_rule" data-word-filter-index="${index}">
+                        <div class="word_filter_rule_pattern">
+                            <span>REGEX</span>
+                            <code>${sanitize(shortPattern)}</code>
+                        </div>
+                        <div class="word_filter_rule_replacement">
+                            <span>REPLACEMENT</span>
+                            <code>${sanitize(shortReplacement || "(empty)")}</code>
+                        </div>
+                        <div class="word_filter_rule_actions">
+                            <button type="button" class="audit_close" data-word-filter-action="edit" data-index="${index}">Edit</button>
+                            <button type="button" class="audit_close word_filter_delete" data-word-filter-action="delete" data-index="${index}">Remove</button>
+                        </div>
+                    </article>
+                `;
+            }).join("")
+            : `<div class="word_filter_empty">No filters in this category yet. Add one above.</div>`;
+
+        const dialog = new Dialog({
+            width: 940,
+            height: 720,
+            minWidth: 620,
+            minHeight: 480,
+            title: "Word filter manager",
+            class: "audit_dialog word_filter_dialog",
+            bodyClass: "audit_center_body",
+            center: true,
+            html: `
+                <div class="audit_shell word_filter_shell">
+                    <header class="word_filter_intro">
+                        <div>
+                            <div class="audit_kicker"><span class="audit_live_dot"></span>BIG OWNER CONSOLE</div>
+                            <h1>Word filter manager</h1>
+                            <p>Edit the live message, username, and godword leak filters.</p>
+                        </div>
+                        <div class="audit_header_mark" aria-hidden="true">FILTERS</div>
+                    </header>
+                    <section class="word_filter_toolbar">
+                        <label>
+                            <span>Filter set</span>
+                            <select data-word-filter-category aria-label="Filter category">
+                                ${categories.map((entry) => `
+                                    <option value="${sanitize(String(entry.id))}" ${entry.id === categoryId ? "selected" : ""}>
+                                        ${sanitize(String(entry.label))}
+                                    </option>
+                                `).join("")}
+                            </select>
+                        </label>
+                        <label>
+                            <span>Search this filter set</span>
+                            <input type="search" data-word-filter-search placeholder="Find a pattern or replacement" aria-label="Search filters">
+                        </label>
+                    </section>
+                    <form class="word_filter_form" data-word-filter-form>
+                        <input type="hidden" data-word-filter-original>
+                        <label>
+                            <span>Regular expression <small>(g + v flags)</small></span>
+                            <textarea data-word-filter-pattern maxlength="1000" rows="2" required spellcheck="false" placeholder="Enter a regular expression"></textarea>
+                        </label>
+                        <label>
+                            <span>Replacement <small>(leave blank to remove matches)</small></span>
+                            <textarea data-word-filter-replacement maxlength="500" rows="2" spellcheck="false" placeholder="Text to replace each match with"></textarea>
+                        </label>
+                        <div class="word_filter_form_actions">
+                            <button type="submit" class="audit_close" data-word-filter-submit>Add filter</button>
+                            <button type="button" class="audit_close word_filter_cancel" data-word-filter-cancel hidden>Cancel edit</button>
+                            <span data-word-filter-status role="status">${sanitize(String(data?.notice || "Changes take effect immediately and are saved across server restarts."))}</span>
+                        </div>
+                    </form>
+                    <div class="word_filter_list_header">
+                        <strong>${sanitize(categoryLabel)}</strong>
+                        <span data-word-filter-count>${rules.length} rules</span>
+                    </div>
+                    <div class="word_filter_list" data-word-filter-list>
+                        ${ruleMarkup}
+                        <div class="word_filter_empty" data-word-filter-search-empty hidden>No filters match that search.</div>
+                    </div>
+                    <footer class="word_filter_footer">
+                        <span>Patterns are validated before they are saved.</span>
+                        <button type="button" class="audit_close word_filter_close">Close</button>
+                    </footer>
+                </div>
+            `,
+        });
+
+        const search = dialog.element.querySelector("[data-word-filter-search]");
+        const categorySelect = dialog.element.querySelector("[data-word-filter-category]");
+        const list = dialog.element.querySelector("[data-word-filter-list]");
+        const count = dialog.element.querySelector("[data-word-filter-count]");
+        const status = dialog.element.querySelector("[data-word-filter-status]");
+        const form = dialog.element.querySelector("[data-word-filter-form]");
+        const originalInput = dialog.element.querySelector("[data-word-filter-original]");
+        const patternInput = dialog.element.querySelector("[data-word-filter-pattern]");
+        const replacementInput = dialog.element.querySelector("[data-word-filter-replacement]");
+        const submitButton = dialog.element.querySelector("[data-word-filter-submit]");
+        const cancelButton = dialog.element.querySelector("[data-word-filter-cancel]");
+        const searchEmpty = dialog.element.querySelector("[data-word-filter-search-empty]");
+
+        const sendRequest = (request) => {
+            cmd(`managewordfilters ${JSON.stringify(request)}`);
+        };
+        const updateSearch = () => {
+            const query = search.value.trim().toLowerCase();
+            let visible = 0;
+            for (const row of list.querySelectorAll("[data-word-filter-index]")) {
+                const rule = rules[Number(row.dataset.wordFilterIndex)];
+                const matches = !query
+                    || rule.pattern.toLowerCase().includes(query)
+                    || rule.replacement.toLowerCase().includes(query);
+                row.hidden = !matches;
+                if (matches) visible++;
+            }
+            count.textContent = `${visible} of ${rules.length} rules`;
+            searchEmpty.hidden = visible !== 0 || rules.length === 0;
+        };
+        const clearEdit = () => {
+            form.reset();
+            originalInput.value = "";
+            submitButton.textContent = "Add filter";
+            cancelButton.hidden = true;
+            patternInput.focus();
+        };
+
+        search.value = previousSearch;
+        search.addEventListener("input", updateSearch);
+        categorySelect.addEventListener("change", () => {
+            search.value = "";
+            sendRequest({ operation: "list", category: categorySelect.value });
+        });
+        form.addEventListener("submit", (event) => {
+            event.preventDefault();
+            const originalPattern = originalInput.value;
+            const request = {
+                operation: originalPattern ? "update" : "add",
+                category: categorySelect.value,
+                pattern: patternInput.value,
+                replacement: replacementInput.value,
+            };
+            if (originalPattern) request.originalPattern = originalPattern;
+            status.textContent = "Saving filter changes…";
+            sendRequest(request);
+        });
+        cancelButton.addEventListener("click", clearEdit);
+        list.addEventListener("click", (event) => {
+            const button = event.target.closest("[data-word-filter-action]");
+            if (!button) return;
+            const rule = rules[Number(button.dataset.index)];
+            if (!rule) return;
+
+            if (button.dataset.wordFilterAction === "edit") {
+                originalInput.value = rule.pattern;
+                patternInput.value = rule.pattern;
+                replacementInput.value = rule.replacement;
+                submitButton.textContent = "Save changes";
+                cancelButton.hidden = false;
+                patternInput.focus();
+                return;
+            }
+
+            if (button.dataset.wordFilterAction === "delete"
+                && window.confirm("Remove this word filter? This takes effect immediately.")) {
+                sendRequest({
+                    operation: "delete",
+                    category: categorySelect.value,
+                    originalPattern: rule.pattern,
+                });
+            }
+        });
+        dialog.element.querySelector(".word_filter_close").onclick = () => dialog.element.remove();
+        updateSearch();
+        return dialog;
+    }
+
+    static auditCenter(data) {
+        const events = Array.isArray(data?.audit?.events) ? data.audit.events : [];
+        const eventMarkup = events.length
+            ? events.map((event, index) => {
+                const action = sanitize(String(event.action || "unknown")).replaceAll("_", " ");
+                const actor = sanitize(String(event.actor_name || "System"));
+                const target = event.target_name ? sanitize(String(event.target_name)) : "";
+                const details = event.details ? sanitize(String(event.details)) : "";
+                const createdAt = sanitize(String(event.created_at || "Unknown time"));
+                const ordinal = String(index + 1).padStart(2, "0");
+                const searchText = sanitize(`${event.action || ""} ${event.actor_name || ""} ${event.target_name || ""} ${event.details || ""}`.toLowerCase());
+                return `
+                    <article class="audit_event" data-action="${action}" data-search="${searchText}">
+                        <div class="audit_event_index">${ordinal}</div>
+                        <div class="audit_event_main">
+                            <div class="audit_event_topline">
+                                <span class="audit_action">${action}</span>
+                                <time class="audit_time">${createdAt}</time>
+                            </div>
+                            <div class="audit_event_summary">
+                                <strong>${actor}</strong>
+                                ${target ? `<span class="audit_arrow">→</span><span>${target}</span>` : ""}
+                            </div>
+                            ${details ? `<div class="audit_details">${details}</div>` : ""}
+                        </div>
+                        <span class="audit_event_status" aria-label="Recorded"></span>
+                    </article>
+                `;
+            }).join("")
+            : `<div class="audit_empty"><span class="audit_empty_mark">—</span><strong>No audit events yet</strong><span>Privileged activity will appear here when recorded.</span></div>`;
+
+        const dialog = new Dialog({
+            width: 900,
+            height: 650,
+            minWidth: 620,
+            minHeight: 420,
+            title: "Audit center",
+            class: "audit_dialog",
+            bodyClass: "audit_center_body",
+            center: true,
+            html: `
+                <div class="audit_shell">
+                    <header class="audit_intro">
+                        <div>
+                            <div class="audit_kicker"><span class="audit_live_dot"></span>SECURITY CONSOLE</div>
+                            <h1>Audit center</h1>
+                            <p>Review the latest privileged activity across BonziWORLD.</p>
+                        </div>
+                        <div class="audit_header_mark" aria-hidden="true">LOG</div>
+                    </header>
+                    <section class="audit_stats" aria-label="Audit summary">
+                        <div class="audit_stat">
+                            <span class="audit_stat_label">Events shown</span>
+                            <strong data-audit-count>${events.length}</strong>
+                        </div>
+                        <div class="audit_stat">
+                            <span class="audit_stat_label">Data source</span>
+                            <strong>Local ledger</strong>
+                        </div>
+                        <div class="audit_stat">
+                            <span class="audit_stat_label">Status</span>
+                            <strong class="audit_status_value"><span class="audit_live_dot"></span>Operational</strong>
+                        </div>
+                    </section>
+                    <div class="audit_toolbar">
+                        <label class="audit_search">
+                            <span class="audit_search_icon" aria-hidden="true"></span>
+                            <input type="search" data-audit-search placeholder="Search actions, people, targets..." aria-label="Search audit events">
+                        </label>
+                        <select data-audit-filter aria-label="Filter audit actions">
+                            <option value="all">All actions</option>
+                        </select>
+                    </div>
+                    <div class="audit_list_header"><span>Recent activity</span><span data-audit-range>${events.length ? `Showing ${events.length} events` : "No events"}</span></div>
+                    <div class="audit_event_list" data-audit-list>${eventMarkup}</div>
+                    <div class="audit_footer">
+                        <span><span class="audit_live_dot"></span>Audit records are read-only</span>
+                        <button class="xp-button audit_close">Close</button>
+                    </div>
+                </div>
+            `,
+        });
+
+        const list = dialog.element.querySelector("[data-audit-list]");
+        const count = dialog.element.querySelector("[data-audit-count]");
+        const range = dialog.element.querySelector("[data-audit-range]");
+        const search = dialog.element.querySelector("[data-audit-search]");
+        const filter = dialog.element.querySelector("[data-audit-filter]");
+        const rows = [...dialog.element.querySelectorAll(".audit_event")];
+        const actions = [...new Set(events.map(event => String(event.action || "unknown")))].sort();
+
+        for (const action of actions) {
+            const option = document.createElement("option");
+            option.value = action;
+            option.textContent = action.replaceAll("_", " ");
+            filter.appendChild(option);
+        }
+
+        const updateResults = () => {
+            const query = search.value.trim().toLowerCase();
+            const selectedAction = filter.value;
+            let visible = 0;
+            for (const row of rows) {
+                const matchesQuery = !query || row.dataset.search.includes(query);
+                const matchesAction = selectedAction === "all" || row.dataset.action === selectedAction.replaceAll("_", " ");
+                row.hidden = !(matchesQuery && matchesAction);
+                if (!row.hidden) visible++;
+            }
+            count.textContent = visible;
+            range.textContent = visible ? `Showing ${visible} event${visible === 1 ? "" : "s"}` : "No matching events";
+            if (!visible && rows.length) {
+                list.querySelector(".audit_filtered_empty")?.remove();
+                list.insertAdjacentHTML("beforeend", `<div class="audit_empty audit_filtered_empty"><span class="audit_empty_mark">?</span><strong>No matching events</strong><span>Try a different search or action filter.</span></div>`);
+            } else {
+                list.querySelector(".audit_filtered_empty")?.remove();
+            }
+        };
+
+        search.addEventListener("input", updateResults);
+        filter.addEventListener("change", updateResults);
+        dialog.element.querySelector(".audit_close").onclick = () => dialog.element.remove();
+        search.focus();
+        return dialog;
+    }
 }
 
 let settingsDialog;
@@ -3909,12 +4917,202 @@ let customStyleEl = customStyle;
 let bgThemeStyle = document.createElement("style");
 document.head.appendChild(customStyle);
 document.head.appendChild(bgThemeStyle);
+let customBackgroundStyle = document.createElement("style");
+document.head.appendChild(customBackgroundStyle);
 let acidThemeStyle = document.createElement("style");
 document.head.appendChild(acidThemeStyle);
 let terminalThemeStyle = document.createElement("style");
 document.head.appendChild(terminalThemeStyle);
-async function themeify(url) {
+let themeAudio = null;
+let stopSynthThemeMusic = null;
+
+function stopThemeAudio() {
+    if (themeAudio) {
+        themeAudio.pause();
+        themeAudio.currentTime = 0;
+        themeAudio = null;
+    }
+    if (stopSynthThemeMusic) {
+        stopSynthThemeMusic();
+        stopSynthThemeMusic = null;
+    }
+}
+
+function startDreamcastMusic() {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    const context = new AudioContext();
+    const master = context.createGain();
+    master.gain.value = 0.035;
+    master.connect(context.destination);
+    const notes = [293.66, 440, 392, 329.63, 293.66, 220, 246.94, 293.66];
+    let step = 0;
+    const playStep = () => {
+        if (context.state === "closed") return;
+        const now = context.currentTime;
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.type = step % 4 === 3 ? "triangle" : "sine";
+        oscillator.frequency.value = notes[step % notes.length];
+        gain.gain.setValueAtTime(0, now);
+        gain.gain.linearRampToValueAtTime(0.55, now + 0.04);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.72);
+        oscillator.connect(gain);
+        gain.connect(master);
+        oscillator.start(now);
+        oscillator.stop(now + 0.75);
+        step++;
+    };
+    playStep();
+    const timer = setInterval(playStep, 520);
+    stopSynthThemeMusic = () => {
+        clearInterval(timer);
+        context.close();
+    };
+}
+
+function startThemeAudio(mode) {
+    stopThemeAudio();
+    if (mode === "ps2") {
+        themeAudio = new Audio("./community-edition/sfx/ps2-startup.mp3");
+        themeAudio.volume = 0.35;
+        themeAudio.play().catch(() => {});
+    } else if (mode === "dreamcast") {
+        startDreamcastMusic();
+    }
+}
+
+const CUSTOM_BACKGROUND_DB = "bonziworld-custom-backgrounds";
+const CUSTOM_BACKGROUND_STORE = "backgrounds";
+const CUSTOM_BACKGROUND_MAX_BYTES = 20 * 1024 * 1024;
+const customBackgroundUrls = new Map();
+
+function openCustomBackgroundDb() {
+    return new Promise((resolve, reject) => {
+        if (!window.indexedDB) {
+            reject(new Error("This browser does not support local background storage."));
+            return;
+        }
+        const request = indexedDB.open(CUSTOM_BACKGROUND_DB, 1);
+        request.onupgradeneeded = () => {
+            if (!request.result.objectStoreNames.contains(CUSTOM_BACKGROUND_STORE)) {
+                request.result.createObjectStore(CUSTOM_BACKGROUND_STORE);
+            }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error || new Error("Could not open background storage."));
+    });
+}
+
+async function customBackgroundTransaction(mode, target, value) {
+    const db = await openCustomBackgroundDb();
+    try {
+        return await new Promise((resolve, reject) => {
+            const transaction = db.transaction(CUSTOM_BACKGROUND_STORE, mode);
+            const store = transaction.objectStore(CUSTOM_BACKGROUND_STORE);
+            const request = value === undefined
+                ? store.get(target)
+                : value === null
+                    ? store.delete(target)
+                    : store.put(value, target);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error("Background storage failed."));
+        });
+    } finally {
+        db.close();
+    }
+}
+
+function updateCustomBackgroundCss() {
+    const roomUrl = customBackgroundUrls.get("room");
+    const loginUrl = customBackgroundUrls.get("login");
+    customBackgroundStyle.textContent =
+        (roomUrl
+            ? `#content{background-image:url("${roomUrl}")!important;background-size:cover!important;background-position:center!important;background-repeat:no-repeat!important;}`
+            : "") +
+        (loginUrl
+            ? `#page_login{background-image:url("${loginUrl}")!important;background-size:cover!important;background-position:center!important;background-repeat:no-repeat!important;}`
+            : "");
+}
+
+function setCustomBackgroundStatus(message, isError = false) {
+    const status = document.getElementById("custom_background_status");
+    if (!status) return;
+    status.textContent = message;
+    status.style.color = isError ? "#a00000" : "";
+}
+
+function useCustomBackgroundBlob(target, blob) {
+    const oldUrl = customBackgroundUrls.get(target);
+    if (oldUrl) URL.revokeObjectURL(oldUrl);
+    if (blob) customBackgroundUrls.set(target, URL.createObjectURL(blob));
+    else customBackgroundUrls.delete(target);
+    updateCustomBackgroundCss();
+}
+
+async function loadCustomBackgrounds() {
+    for (const target of ["room", "login"]) {
+        try {
+            const blob = await customBackgroundTransaction("readonly", target);
+            if (blob instanceof Blob && blob.type.startsWith("image/")) {
+                useCustomBackgroundBlob(target, blob);
+            }
+        } catch (error) {
+            console.error("Could not load custom background:", error);
+        }
+    }
+}
+
+function chooseCustomBackground(target) {
+    if (target !== "room" && target !== "login") return;
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        if (!file.type.startsWith("image/")) {
+            setCustomBackgroundStatus("Please choose an image file.", true);
+            return;
+        }
+        if (file.size > CUSTOM_BACKGROUND_MAX_BYTES) {
+            setCustomBackgroundStatus("That image is larger than 20 MB.", true);
+            return;
+        }
+        try {
+            await customBackgroundTransaction("readwrite", target, file);
+            useCustomBackgroundBlob(target, file);
+            setCustomBackgroundStatus(`${target === "room" ? "In-room" : "Login"} background saved.`);
+        } catch (error) {
+            console.error("Could not save custom background:", error);
+            setCustomBackgroundStatus("Could not save that background in this browser.", true);
+        }
+    };
+    input.click();
+}
+
+async function clearCustomBackground(target) {
+    if (target !== "room" && target !== "login") return;
+    try {
+        await customBackgroundTransaction("readwrite", target, null);
+        useCustomBackgroundBlob(target, null);
+        setCustomBackgroundStatus(`${target === "room" ? "In-room" : "Login"} background cleared.`);
+    } catch (error) {
+        console.error("Could not clear custom background:", error);
+        setCustomBackgroundStatus("Could not clear that background.", true);
+    }
+}
+
+async function themeify(url, audioMode = "") {
   try {
+    if (!url) {
+      customStyle.textContent = "";
+      settings.set("customCSS", "");
+      const textarea = document.querySelector(".settings_textarea");
+      if (textarea) textarea.value = "";
+      stopThemeAudio();
+      return;
+    }
     const response = await fetch(url);
     
     // Check if the request was successful
@@ -3927,6 +5125,7 @@ async function themeify(url) {
     const cssString = await response.text();
     customStyle.textContent=cssString;
     if(document.querySelector('.settings_textarea') !== null){document.querySelector('.settings_textarea').value = cssString; settings.set('customCSS', document.querySelector('.settings_textarea').value);}
+    startThemeAudio(audioMode);
   } catch (error) {
     console.error('Error fetching CSS:', error);
   }
@@ -3937,6 +5136,11 @@ const settings = {
             type: "boolean",
             default: false,
             xml: { tag: "hideImages", attr: "on" },
+        },
+        disableCrosscolors: {
+            type: "boolean",
+            default: false,
+            xml: { tag: "disableCrosscolors", attr: "on" },
         },
         disableDM: {
             type: "boolean",
@@ -4002,6 +5206,16 @@ const settings = {
             default: "",
             xml: { tag: "autoHats", cdata: true },
         },
+        autoCrosscolor: {
+            type: "string",
+            default: "",
+            xml: { tag: "autoCrosscolor", cdata: true },
+        },
+        autoCrosshats: {
+            type: "string",
+            default: "",
+            xml: { tag: "autoCrosshats", cdata: true },
+        },
         autoTag: {
             type: "string",
             default: "",
@@ -4056,13 +5270,6 @@ const settings = {
             xml: { tag: "customCSS", cdata: true },
             onLoad: (value) => applyCustomCSS(value),
         },
-        startupJS: {
-            type: "string",
-            default: "",
-            placeholder: "Enter startup JavaScript here",
-            xml: { tag: "startupJS", cdata: true },
-            onLoad: (value) => runStartupJS(value),
-        },
         bgHue: {
             type: "number",
             default: 0,
@@ -4097,6 +5304,15 @@ const settings = {
                     type: "checkbox",
                     label: "Hide Images",
                     description: "Hide images and videos in chat behind a click-to-reveal placeholder.",
+                },
+                {
+                    key: "disableCrosscolors",
+                    type: "checkbox",
+                    label: "Disable Crosscolors",
+                    description: "Show custom crosscolor images as the normal purple Bonzi on this device.",
+                    onChange: () => {
+                        for (const bonzi of bonzis.values()) bonzi.updateSprite();
+                    },
                 },
                 {
                     key: "disableDM",
@@ -4186,6 +5402,26 @@ const settings = {
                     label: "Disable Serverside Movement",
                     description: "Ignore position updates for other users' Bonzis (they stop sliding around when others drag them).",
                 },
+                {
+                    key: "disableShadows",
+                    type: "checkbox",
+                    label: "Disable Shadows",
+                    description: "Remove Bonzi and speech-bubble shadows.",
+                    onChange: (value) => document.body.classList.toggle("no_shadows", value),
+                },
+                {
+                    key: "disableBubbleFade",
+                    type: "checkbox",
+                    label: "Disable Bubble Fade-out",
+                    description: "Hide speech bubbles immediately instead of fading them out.",
+                    onChange: (value) => document.body.classList.toggle("no_bubble_fade", value),
+                },
+                {
+                    key: "disableLoginFade",
+                    type: "checkbox",
+                    label: "Disable Login Fade-out",
+                    description: "Hide the login screen immediately after joining.",
+                },
             ],
         },
         autojoin: {
@@ -4219,6 +5455,20 @@ const settings = {
                     description: () => hatHint(),
                 },
                 {
+                    key: "autoCrosscolor",
+                    type: "text",
+                    label: "Crosscolor",
+                    placeholder: "Image URL, or: sheet https://...",
+                    description: "Optional. Applied after Color / Skin, so it overrides the normal color.",
+                },
+                {
+                    key: "autoCrosshats",
+                    type: "text",
+                    label: "Crosshats",
+                    placeholder: "Up to 10 image URLs separated by spaces",
+                    description: "Optional. Every valid URL is added as a separate crosshat.",
+                },
+                {
                     key: "autoTag",
                     type: "text",
                     label: "Tag",
@@ -4228,29 +5478,28 @@ const settings = {
                 },
             ],
         },
-        startupjs: {
-            name: "Mods/startup js",
-            settings: [
-                {
-                    type: "html",
-                    html: "Enter JavaScript to execute when this client starts. This is stored locally and only affects your browser."
-                },
-                {
-                    key: "startupJS",
-                    type: "textarea",
-                    placeholder: "Enter startup JavaScript here",
-                    description: "Startup scripts run immediately when BonziWORLD loads. Use caution.",
-                    onChange: (value) => runStartupJS(value),
-                },
-            ],
-        },
         css: {
             name: "Themes",
             settings: [
                 {
                     type: "html",
                     html: `BonziWORLD has a few built-in themes. You can also enter your own custom CSS below.<br>
-                    <button onclick="applyCustomCSS(''); themeify('mejaw');">Default</button><button onclick="themeify('./windowsvista.css')">Vista</button>`
+                    <button onclick="themeify('')">Default</button>
+                    <button onclick="themeify('./windowsvista.css')">Vista</button>
+                    <button onclick="themeify('./themes/playstation2.css', 'ps2')">PlayStation 2</button>
+                    <button onclick="themeify('./themes/dreamcast.css', 'dreamcast')">Dreamcast + Music</button>
+                    <button onclick="themeify('./themes/gamecube.css')">GameCube</button>
+                    <button onclick="themeify('./themes/longhorn.css?v=2')">Longhorn Blue</button>`
+                },
+                {
+                    type: "html",
+                    html: `<hr><b>Custom Background</b><br>
+                    Images are stored only in this browser (maximum 20 MB).<br>
+                    <button onclick="chooseCustomBackground('room')">Upload In-Room Background</button>
+                    <button onclick="clearCustomBackground('room')">Clear In-Room</button><br>
+                    <button onclick="chooseCustomBackground('login')">Upload Login Background</button>
+                    <button onclick="clearCustomBackground('login')">Clear Login</button>
+                    <div id="custom_background_status" aria-live="polite"></div>`
                 },
                 {
                     type: "html",
@@ -4542,22 +5791,25 @@ const settings = {
 // These suggestion lists mirror server/settings.json (bonziColors / hats /
 // blessedHats). They only feed the autocomplete hints in the Auto Join panel;
 // the server enforces what each rank may actually use, so drift here is harmless.
-const AUTO_NORMAL_COLORS = ["purple", "blue", "magenta", "green", "red", "black", "brown", "maroon", "peedy", "yellow", "cyan", "pink", "gray", "orange", "white"];
+const AUTO_NORMAL_COLORS = ["purple", "blue", "magenta", "green", "red", "black", "brown", "maroon", "peedy", "yellow", "cyan", "teal", "indigo", "violet", "pink", "gray", "orange", "white", "brainrotted", "abyss", "jungle"];
 const AUTO_BLESSED_SKINS = ["angel", "glow", "noob", "gold"];
 const AUTO_POPE_SKINS = ["pope", "radical", "rad", "darllo", "izhan", "jimmy", "greenmsn", "greenpope", "bonzidev"];
-const AUTO_NORMAL_HATS = ["tophat", "bluebowtie", "bieber", "troll", "kamala", "banana", "elon", "bucket", "scarf", "obama", "bfdi", "maga", "evil", "emoji", "wizard", "cat", "witch", "qmark", "horse", "bowtie", "pot", "chef", "ushanka", "party", "epic", "bush", "clown", "sunglasses", "chain"];
-const AUTO_BLESSED_HATS = ["dank", "cigar", "illuminati", "bear", "truck", "propeller", "nopupil", "pumpkin", "cauldron", "frankenstein", "hockey", "don", "decorated", "santa", "elf", "rudolph"];
+const AUTO_RADICAL_SKINS = ["greenjimmy"];
+const AUTO_BIG_OWNER_SKINS = ["bluejimmy"];
+const AUTO_NORMAL_HATS = ["tophat", "bluebowtie", "bieber", "troll", "kamala", "banana", "elon", "bucket", "scarf", "obama", "bfdi", "maga", "evil", "emoji", "wizard", "cat", "witch", "qmark", "horse", "bowtie", "pot", "chef", "ushanka", "party", "epic", "bush", "clown", "sunglasses", "chain", "greenbowtie", "yellowbowtie", "purplebowtie", "ant", "astronaut", "bwi", "cape", "gun", "ninja", "soldier", "hacker", "police"];
+  const AUTO_BLESSED_HATS = ["dank", "cigar", "illuminati", "bear", "truck", "propeller", "nopupil", "dance", "pumpkin", "cauldron", "frankenstein", "hockey", "don", "decorated", "santa", "elf", "rudolph", "goldhat", "diamondhat", "rainbowhat", "emeraldhat", "rubyhat", "amethysthat", "abysshat", "redglow", "cloned"];
 // Skin anyone can wear: /freepope (runlevel 0) gives the dunce cap + "Fake Pope" tag.
 const AUTO_PUBLIC_SKINS = ["freepope"];
 // Mod-tier (runlevel >= 2) hats hardcoded in the server /hat command.
-const AUTO_MOD_HATS = ["king", "headphones2", "headphones3", "scarf2", "redcrown", "diamondchain", "silverchain", "bluepupils", "greenpupils"];
+const AUTO_MOD_HATS = ["king", "headphones2", "headphones3", "scarf2", "redcrown", "diamondchain", "reddiamondchain", "silverchain", "bluepupils", "greenpupils", "greendiamondchain", "yellowdiamondchain", "purplediamondchain", "scarf3", "scarf4", "scarf5", "yellowpupils", "purplepupils", "bluecrown", "greencrown", "yellowcrown", "purplecrown", "headphones4", "gamer", "premium", "opalchain"];
+const AUTO_POPE_HATS = ["king2", "hiimstickman", "palestine"];
 
 // "Mod and above" can set tags (server /tag is runlevel 1.5: kings/admins/popes).
-function isModRank() { return admin || king || pope || radical; }
+function isModRank() { return admin || king || pope || owner || radical || bigowner; }
 // Janny (runlevel 1.05) and above — janitors, kings, admins, popes.
-function isJannyRank() { return janitor || king || admin || pope || radical; }
+function isJannyRank() { return janitor || king || admin || pope || owner || radical || bigowner; }
 // Blessed-tier perks (blessed skins/hats, multihat) are runlevel >= 1.
-function isBlessedRank() { return blessed || janitor || king || admin || pope || radical; }
+function isBlessedRank() { return blessed || janitor || king || admin || pope || owner || radical || bigowner; }
 // Mods (runlevel >= 2: king/admin/pope) get the 10-hat limit server-side.
 function autoHatLimit() { return isModRank() ? 10 : isBlessedRank() ? 3 : 1; }
 
@@ -4565,6 +5817,8 @@ function appearanceSuggestions() {
     let out = [...AUTO_NORMAL_COLORS, ...AUTO_PUBLIC_SKINS];
     if (isBlessedRank()) out.push(...AUTO_BLESSED_SKINS);
     if (pope) out.push(...AUTO_POPE_SKINS);
+    if (radical || bigowner) out.push(...AUTO_RADICAL_SKINS);
+    if (bigowner) out.push(...AUTO_BIG_OWNER_SKINS);
     return [...new Set(out)];
 }
 
@@ -4572,6 +5826,7 @@ function hatSuggestions() {
     let out = [...AUTO_NORMAL_HATS];
     if (isBlessedRank()) out.push(...AUTO_BLESSED_HATS);
     if (isModRank()) out.push(...AUTO_MOD_HATS);
+    if (pope || owner || radical || bigowner) out.push(...AUTO_POPE_HATS);
     out.push(...unlocks); // vault hats this user has unlocked
     return [...new Set(out)];
 }
@@ -4586,7 +5841,7 @@ function appearanceHint() {
 function hatHint() {
     let limit = autoHatLimit();
     let extra = isModRank() ? " Blessed/mod/vault hats allowed." : isBlessedRank() ? " Blessed/vault hats allowed." : "";
-    return `Up to ${limit} hat${limit === 1 ? "" : "s"}, separated by spaces.${extra}`;
+    return `Up to ${limit} hat${limit === 3 ? "" : "s"}, separated by spaces.${extra}`;
 }
 
 // Build the Auto Join payload sent with the login event. The server applies
@@ -4598,9 +5853,11 @@ function autoJoinPresets() {
     if (!settings.get("autoApply")) return undefined;
     let color = (settings.get("autoColor") || "").trim();
     let hats = (settings.get("autoHats") || "").trim();
+    let crosscolor = (settings.get("autoCrosscolor") || "").trim();
+    let crosshats = (settings.get("autoCrosshats") || "").trim();
     let tag = (settings.get("autoTag") || "").trim();
-    if (!color && !hats && !tag) return undefined;
-    return { color, hats, tag };
+    if (!color && !hats && !crosscolor && !crosshats && !tag) return undefined;
+    return { color, hats, crosscolor, crosshats, tag };
 }
 
 function applyCustomCSS(css) {
@@ -4682,19 +5939,9 @@ function applyBgTheme() {
         `filter:hue-rotate(${hue}deg) saturate(${sat}%) brightness(${bri}%);}`;
 }
 
-function runStartupJS(code) {
-    if (!code || typeof code !== "string") return;
-    let script = code.trim();
-    if (!script) return;
-    try {
-        new Function(script)();
-    } catch (err) {
-        console.error("Startup JS failed:", err);
-    }
-}
-
 settings.init();
 settings.load();
+loadCustomBackgrounds();
 
 function xpath(el, expr) {
     let result = el.getRootNode().evaluate(expr, el);
@@ -4813,7 +6060,6 @@ async function water() {
         document.head.appendChild(script);
     }
 }
-
 
 
 function cmd(str) {
@@ -5030,6 +6276,142 @@ function djPopup() {
 start_button.onclick = () => {
     start_menu.hidden = !start_menu.hidden;
 };
+function openCommunityContent() {
+    start_menu.hidden = true;
+    window.open("community.html", "_blank", "noopener");
+}
+const communityButton = document.getElementById("community_button");
+if (communityButton) {
+    communityButton.onclick = openCommunityContent;
+    communityButton.onkeydown = (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            openCommunityContent();
+        }
+    };
+}
+let appletsDialog = null;
+let notepadDialog = null;
+const NOTEPAD_STORAGE_KEY = "bonziworld.notepad";
+
+function openNotepad() {
+    if (notepadDialog?.element?.isConnected) {
+        notepadDialog.focus();
+        return notepadDialog;
+    }
+
+    let savedText = "";
+    try {
+        savedText = localStorage.getItem(NOTEPAD_STORAGE_KEY) || "";
+    } catch {
+        // Private browsing modes may disable local storage; the editor still works.
+    }
+
+    const dialog = new Dialog({
+        title: "Notepad",
+        class: "flex_window notepad_window",
+        bodyClass: "notepad_body",
+        width: 560,
+        height: 410,
+        minWidth: 320,
+        minHeight: 220,
+        center: true,
+        onclose: () => {
+            if (notepadDialog === dialog) notepadDialog = null;
+        },
+        html: `
+            <div class="notepad_app">
+                <textarea class="notepad_text" aria-label="Notepad text" spellcheck="true"
+                    placeholder="Start typing..."></textarea>
+                <div class="notepad_statusbar">
+                    <span class="notepad_status" aria-live="polite">Ready</span>
+                    <button class="xp-button notepad_clear" type="button">Clear</button>
+                </div>
+            </div>
+        `,
+    });
+
+    const textArea = dialog.element.querySelector(".notepad_text");
+    const status = dialog.element.querySelector(".notepad_status");
+    const clearButton = dialog.element.querySelector(".notepad_clear");
+    textArea.value = savedText;
+
+    const saveText = () => {
+        try {
+            localStorage.setItem(NOTEPAD_STORAGE_KEY, textArea.value);
+            status.textContent = "Saved locally";
+        } catch {
+            status.textContent = "Local saving unavailable";
+        }
+    };
+
+    textArea.addEventListener("input", saveText);
+    clearButton.onclick = () => {
+        textArea.value = "";
+        saveText();
+        textArea.focus();
+    };
+
+    notepadDialog = dialog;
+    textArea.focus();
+    return dialog;
+}
+
+function openApplets() {
+    if (appletsDialog?.element?.isConnected) {
+        appletsDialog.focus();
+        return appletsDialog;
+    }
+
+    const dialog = new Dialog({
+        title: "Applets",
+        class: "flex_window applets_window",
+        bodyClass: "applets_body",
+        width: 340,
+        height: 220,
+        resizable: false,
+        center: true,
+        onclose: () => {
+            if (appletsDialog === dialog) appletsDialog = null;
+        },
+        html: `
+            <div class="applet_list">
+                <button class="applet_launcher" type="button">
+                    <img src="/img/desktop/js.png" alt="">
+                    <span class="applet_launcher_copy">
+                        <strong>Notepad</strong>
+                        <small>Write a quick local note.</small>
+                    </span>
+                </button>
+            </div>
+        `,
+    });
+
+    dialog.element.querySelector(".applet_launcher").onclick = () => {
+        appletsDialog = null;
+        dialog.element.remove();
+        openNotepad();
+    };
+
+    appletsDialog = dialog;
+    return dialog;
+}
+
+const appletsButton = document.getElementById("applets_button");
+if (appletsButton) {
+    appletsButton.onclick = () => {
+        start_menu.hidden = true;
+        openApplets();
+    };
+}
+const gamesButton = document.getElementById("gmes_button");
+if (gamesButton) {
+    gamesButton.onclick = () => {
+        start_menu.hidden = true;
+        window.open("community-edition/arcade/", "_blank", "noopener");
+    };
+}
+
 function openDmWindow(peerGuid, peerName) {
     if (dmWindows.has(peerGuid)) {
         const existing = dmWindows.get(peerGuid);
@@ -5099,11 +6481,12 @@ function appendDmEntry(logEl, fromGuid, text) {
     `);
     if (atBottom) logEl.scrollTop = logEl.scrollHeight;
 }
-function userInfoPopup(userPublic) {
+function userInfoPopup(userPublic, theid) {
     let u = userPublic || {};
     let color = sanitize((u.color || "").split(" ")[0] || "(none)");
     let name = sanitize(u.name || "");
     let tag = sanitize(u.tag || "") || "(none)";
+    let guid = sanitize(theid || "")
     new Dialog({
         title: "User Info",
         class: "flex_window user_info",
@@ -5111,7 +6494,8 @@ function userInfoPopup(userPublic) {
             <div style="padding: 12px; line-height: 1.7;">
                 <b>Color:</b> ${color}<br>
                 <b>Name:</b> ${name}<br>
-                <b>Tag:</b> ${tag}
+                <b>Tag:</b> ${tag}<br>
+                <b>GUID:</b> ${theid}
             </div>
         `,
         x: 200,
@@ -5150,7 +6534,14 @@ function bonziEditorPopup() {
         let grid = element.querySelector(selector);
         for (let hat of itemArray) {
             let item = document.createElement("div");
-            item.style.backgroundImage = `url("${path}/${hat}.webp")`;
+            const remoteAsset = REMOTE_BONZI_ASSET_URLS[hat];
+            item.style.backgroundImage = remoteAsset
+                ? resolveBonziAssetUrl(hat)
+                : `url("${path}/${hat}.webp")`;
+            if (selector === ".color-grid" && REMOTE_SPRITE_COLORS.has(hat)) {
+                item.style.backgroundSize = "600px 520px";
+                item.style.backgroundPosition = "0 0";
+            }
             item.className = "editor-item";
             if (isLocked?.(hat)) item.classList.add("locked-item");
             item.setAttribute("data-tooltip", tooltip?.(hat) ?? hat);
@@ -5161,8 +6552,29 @@ function bonziEditorPopup() {
             grid.appendChild(item);
         }
     }
-    itemElements(".color-grid", BonziData.colors.normal, "img/pfp", (hat) => cmd(`color ${hat}`));
+    function insertHatSection(title, className, hats, path, tooltip) {
+        const hatsPanel = element.querySelector(".hats");
+        const unlockableHeading = element.querySelector(".unlockable-grid").previousElementSibling;
+        const heading = document.createElement("h2");
+        heading.textContent = title;
+        const grid = document.createElement("div");
+        grid.className = `editor-grid ${className}`;
+        hatsPanel.insertBefore(heading, unlockableHeading);
+        hatsPanel.insertBefore(grid, unlockableHeading);
+        itemElements(`.${className}`, hats, path, (hat) => cmd(`hat ${hat}`), {
+            tooltip: (hat) => `${hat}\n${tooltip}`,
+        });
+    }
+    const editorColors = [...BonziData.colors.normal];
+    if (radical || bigowner) editorColors.push("greenjimmy");
+    if (bigowner) editorColors.push("bluejimmy");
+    itemElements(".color-grid", [...new Set(editorColors)], "img/pfp", (color) => {
+        cmd(DEDICATED_APPEARANCE_COMMANDS.has(color) ? color : `color ${color}`);
+    });
     itemElements(".hat-grid", BonziData.hats.normal, "img/haticon", (hat) => cmd(`hat ${hat}`));
+    if (isBlessedRank()) {
+        insertHatSection("Blessed hats", "blessed-hat-grid", BonziData.hats.blessed, "img/bonzi", "Blessed+ only");
+    }
     itemElements(".unlockable-grid", BonziData.hats.vault, "img/haticon", (hat) => cmd(`hat ${hat}`), {
         isLocked: (hat) => !unlocks.includes(hat),
         tooltip: (hat) => `${hat}\nUnlocked in the vault`,
@@ -5170,9 +6582,15 @@ function bonziEditorPopup() {
     itemElements(".unlockable-grid", BonziData.hats.event.filter(hat => unlocks.includes(hat)), "img/haticon", (hat) => cmd(`hat ${hat}`), {
         tooltip: (hat) => `${hat}\nFormerly unlocked in the 2026 April Fools event`,
     });
+    if (janitor || admin || king || pope || owner || radical || bigowner) {
+        insertHatSection("Moderator hats", "mod-hat-grid", BonziData.hats.mod, "img/haticon", "Moderator-only");
+    }
+    if (pope || owner || radical || bigowner) {
+        insertHatSection("Pope+ hats", "pope-hat-grid", BonziData.hats.pope, "img/bonzi", "Pope+ only");
+    }
     let preview = element.querySelector(".preview");
     let myColor = bonzis.get(me).color;
-    preview.style.backgroundImage = myColor.split(" ").map(c => colorTokenToUrl(c, "img/bonzi")).reverse().join(", ");
+    preview.style.backgroundImage = myColor.split(" ").map(resolveBonziAssetUrl).reverse().join(", ");
     preview.style.backgroundSize = "";
     preview.style.backgroundRepeat = "";
 }
@@ -5262,7 +6680,6 @@ function pollCreatorPopup() {
     };
 
 
-
     element.querySelector(".create-poll").onclick = () => {
         let title = element.querySelector(".poll-title").value.trim();
         let options = [...optionsContainer.querySelectorAll("input")]
@@ -5274,7 +6691,6 @@ function pollCreatorPopup() {
         dialog.element.remove();
     };
 }
-
 
 
 poll_button.onclick = () => {
@@ -5367,10 +6783,13 @@ function uploadPopup(initialFile) {
     };
 }
 
-image_button.onclick = () => {
-    start_menu.hidden = true;
-    uploadPopup();
-};
+const imageButton = document.getElementById("image_button");
+if (imageButton) {
+    imageButton.onclick = () => {
+        start_menu.hidden = true;
+        uploadPopup();
+    };
+}
 
 document.onpaste = (e) => {
     let items = e.clipboardData.items;
@@ -5517,33 +6936,48 @@ socket.on("janitorRemove", (data) => {
 });
 socket.on("blessed", () => { blessed = true; blessedPopup(); });
 socket.on("debless", () => { blessed = false; Dialog.alert("You have been deblessed.") });
-socket.on("janitor",       () => { janitor = true; queue_button.hidden = false; openJanitorQueue(); addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || radical); });
-socket.on("janitor_first", () => { janitorPopup(); addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || radical); });
-socket.on("djs",       () => { djs = true; queue_button.hidden = true; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || radical); });
-socket.on("djs_first", () => { djPopup(); addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || radical); });
-socket.on("king",  () => { king = true;  queue_button.hidden = false; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || radical); });
-socket.on("admin",  () => { admin = true;  queue_button.hidden = false; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || radical); });
-socket.on("radical",  () => { radical = true; pope = true; admin = true; queue_button.hidden = false; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || radical); });
-socket.on("radical",    () => { radical = true; pope = true; admin = true; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || radical); });
-socket.on("contributor",  () => { contributor = true; pope = true; admin = true; queue_button.hidden = false; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || radical); });
-socket.on("contributor",    () => { contributor = true; pope = true; admin = true; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || radical); });
-socket.on("developer",  () => { developer = true; pope = true; admin = true; queue_button.hidden = false; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || radical); });
-socket.on("developer",    () => { developer = true; pope = true; admin = true; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || radical); });
-socket.on("pope",  () => { pope = true; admin = true; queue_button.hidden = false; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || radical); });
-socket.on("pope",    () => { pope = true; admin = true; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || radical); });
+socket.on("janitor",       () => { janitor = true; queue_button.hidden = false; openJanitorQueue(); addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+socket.on("janitor_first", () => { janitorPopup(); addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+socket.on("djs",       () => { djs = true; queue_button.hidden = true; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+socket.on("djs_first", () => { djPopup(); addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+socket.on("king",  () => { king = true;  queue_button.hidden = false; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+socket.on("admin",  () => { admin = true;  queue_button.hidden = false; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+socket.on("owner", () => { owner = true; pope = true; admin = true; queue_button.hidden = false; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+ socket.on("radical",  () => { radical = true; pope = true; admin = true; queue_button.hidden = false; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+ socket.on("radical",    () => { radical = true; pope = true; admin = true; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+socket.on("bigowner", () => { bigowner = true; radical = true; pope = true; admin = true; queue_button.hidden = false; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = false; });
+socket.on("contributor",  () => { contributor = true; pope = true; admin = true; queue_button.hidden = false; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+socket.on("contributor",    () => { contributor = true; pope = true; admin = true; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+socket.on("developer",  () => { developer = true; pope = true; admin = true; queue_button.hidden = false; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+socket.on("developer",    () => { developer = true; pope = true; admin = true; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+socket.on("hoops",  () => { hoops = true; developer = true; pope = true; admin = true; queue_button.hidden = false; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+socket.on("hoops",    () => { hoops = true; developer = true; pope = true; admin = true; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+socket.on("pope",  () => { pope = true; admin = true; queue_button.hidden = false; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
+socket.on("pope",    () => { pope = true; admin = true; addPrivilegedCommands(); if (chat_log_mode_button) chat_log_mode_button.hidden = !(admin || king || pope || owner || radical); });
 socket.on("acid", () => { applyAcidTheme(); });
 socket.on("unacid", () => { acidThemeStyle.textContent = ""; });
 socket.on("terminal", () => { applyTerminalTheme(); });
 socket.on("unterminal", () => { terminalThemeStyle.textContent = ""; });
 socket.on("nuked", () => setTimeout(() => { blockerror = true; location.reload() }, 4000));
-socket.on("banned", () => setTimeout(() => { blockerror = true; window.location.replace("https://bonziworld.kr/nyancat.mp4"); }, 0));
 socket.on("removed", () => setTimeout(() => { blockerror = true; location.reload() }, 0));
 socket.on("removede", () => setTimeout(() => { blockerror = true; window.location.replace("https://bonziworld.kr/kittycat.mp4"); }, 0));
+socket.on("jumpscare", () => {
+    blockerror = true;
+    window.location.replace("./jumpscare.mp4");
+});
 
 
 const banSVG = (ip) => `<svg class="ban-unban-btn" data-ip="${ip}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 122.88 115.66" style="width: 28px; height: 28px; display: inline-block; margin-left: 5px; cursor: pointer; vertical-align: middle;"><defs><style>.cls-1{fill:#121212;}.cls-2{fill:#d8453e;}</style></defs><path class="cls-1" d="M37.26,55.09c-2-3.22-5.82-7.6-5.82-11.38a6.09,6.09,0,0,1,4.09-5.53c-.19-3.2-.32-6.44-.32-9.65,0-1.9,0-3.81.11-5.7A13.44,13.44,0,0,1,36,20,20.24,20.24,0,0,1,45,8.47a25.74,25.74,0,0,1,4.91-2.35C53,5,51.54.07,55,0c8-.2,21.08,6.77,26.19,12.3a18.61,18.61,0,0,1,5.22,12.45l-.33,14a4.6,4.6,0,0,1,3.36,2.87C90.48,46,85.9,51.47,83.78,55c-2,3.24-9.45,12.06-9.46,12.14A2.9,2.9,0,0,0,75,68.74a18.48,18.48,0,0,0,2.47,2.74,30.77,30.77,0,0,0-5.12,35H0C0,74.61,34.19,84.72,45.81,68.74c.58-.85.84-1.3.83-1.67,0-.2-8.61-10.75-9.38-12Z"/><path class="cls-2" d="M99.82,69.54a23.06,23.06,0,1,1-16.3,6.75,23,23,0,0,1,16.3-6.75ZM113,85.42l-20.31,20.3a14.62,14.62,0,0,0,2.88,1.21,15,15,0,0,0,14.88-3.76l0,0A15,15,0,0,0,113,85.42ZM86.7,99.78,107,79.47a14.71,14.71,0,0,0-7.18-1.83A15,15,0,0,0,85.49,96.89a14.46,14.46,0,0,0,1.21,2.89Z"/></svg>`;
 
 socket.on("alert", (data) => {
+    if (data?.wordFilters) {
+        Dialog.wordFilterManager(data.wordFilters);
+        return;
+    }
+    if (data?.audit) {
+        Dialog.auditCenter(data);
+        return;
+    }
     Dialog.alert(data);
 });
 
@@ -5623,7 +7057,7 @@ function resetRainbow(el) {
     }
 }
 
-const rainbowSelector = "gay-rainbow,gay-spoiler,code"; // can have anims
+const rainbowSelector = "gay-rainbow,gay-rainbowglow,gay-spoiler,code"; // can have anims
 
 const observer = new MutationObserver(mutations => {
     for (let mutation of mutations) {
@@ -5673,15 +7107,6 @@ document.body.onclick = (e) => {
     }
 };
 
-document.addEventListener("visibilitychange", () => {
-    if (typeof socket !== "undefined" && socket.connected) {
-        if (document.hidden) {
-            socket.emit("updateStatus", "afk");
-        } else {
-            socket.emit("updateStatus", "online");
-        }
-    }
-});
 socket.on("alert", () => {
     new Audio("/sfx/error.mp3").play().catch(() => {});
 });

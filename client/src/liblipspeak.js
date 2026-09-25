@@ -15,16 +15,39 @@ let taskId = 0;
 let tasks = new Map();
 let currentVoice = "espeak";
 
-let ttsWorker = new Worker(new URL("./espeakWorker.js", import.meta.url), { type: "module" });
-let audioCtx = new AudioContext();
-let gainNode = new GainNode(audioCtx, { gain: 1 });
-gainNode.connect(audioCtx.destination);
+let workerBroken = false;
+let ttsWorker = null;
+try {
+    ttsWorker = new Worker(new URL("./espeakWorker.js?v=20260905-2", import.meta.url), { type: "module" });
+} catch (error) {
+    workerBroken = true;
+    console.error("BonziWORLD speech worker could not start:", error);
+}
+
+const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+let audioCtx = AudioContextClass ? new AudioContextClass() : null;
+let gainNode = audioCtx ? new GainNode(audioCtx, { gain: 1 }) : null;
+if (gainNode && audioCtx) gainNode.connect(audioCtx.destination);
+
+function unlockAudio() {
+    if (!audioCtx || audioCtx.state !== "suspended") return;
+    audioCtx.resume().catch((error) => {
+        console.warn("BonziWORLD audio is still locked:", error);
+    });
+}
+
+if (typeof window !== "undefined") {
+    for (const eventName of ["pointerdown", "keydown", "touchstart"]) {
+        window.addEventListener(eventName, unlockAudio, { passive: true });
+    }
+}
 
 export function setVoice(name) {
     currentVoice = "espeak";
 }
 
 export function setVolume(vol) {
+    if (!gainNode) return;
     if (vol === 0) {
         gainNode.gain.value = 0;
     } else {
@@ -75,7 +98,12 @@ function play(text, options = {}, onend = () => {}, onstart = () => {}, signal =
     let id = taskId++;
     text = text.replace(/(.{5,}?)\1{5,}/gi, "$1$1$1$1$1"); // anti copy-paste spam
     tasks.set(id, { onstart, onend, signal, text });
-    ttsWorker.postMessage({ id, text, options });
+    unlockAudio();
+    if (workerBroken || !ttsWorker) {
+        playBrowserFallback(id, options);
+    } else {
+        ttsWorker.postMessage({ id, text, options });
+    }
 }
 
 // playSSML kept for interface compatibility (no SSML in espeak CLI here).
@@ -85,20 +113,72 @@ function playSSML(text, options = {}, onend = () => {}, onstart = () => {}, sign
 
 export let speak = { play, playSSML };
 
-ttsWorker.addEventListener("message", async (e) => {
+function playBrowserFallback(id, options) {
+    let task = tasks.get(id);
+    if (!task) return;
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        tasks.delete(id);
+        task.onend();
+        return;
+    }
+
+    let utterance = new SpeechSynthesisUtterance(task.text);
+    utterance.pitch = Math.max(0.1, Math.min(2, Number(options.pitch || 50) / 50));
+    utterance.rate = Math.max(0.5, Math.min(2, Number(options.speed || 175) / 175));
+    let fallbackSource = {
+        stop() {
+            utterance.onend = null;
+            utterance.onerror = null;
+            window.speechSynthesis.cancel();
+            tasks.delete(id);
+            task.onend();
+        },
+    };
+    let finished = false;
+    let finish = () => {
+        if (finished) return;
+        finished = true;
+        tasks.delete(id);
+        task.onend();
+    };
+    utterance.onstart = () => {
+        task.onstart(fallbackSource, buildLip(task.text, Math.max(500, task.text.length * 55)));
+    };
+    utterance.onend = finish;
+    utterance.onerror = finish;
+    window.speechSynthesis.speak(utterance);
+}
+
+if (ttsWorker) {
+    ttsWorker.addEventListener("error", (error) => {
+        workerBroken = true;
+        console.error("BonziWORLD speech worker failed:", error.message || error);
+        for (const [id] of tasks) playBrowserFallback(id, {});
+    });
+}
+
+ttsWorker?.addEventListener("message", async (e) => {
     let { id, wav } = e.data;
     let task = tasks.get(id);
     if (!task) return;
+    if (e.data.error) {
+        workerBroken = true;
+        console.error("BonziWORLD eSpeak failed:", e.data.error);
+        playBrowserFallback(id, {});
+        return;
+    }
     if (task.signal.aborted) {
         tasks.delete(id);
         return;
     }
     try {
-        let buffer = await audioCtx.decodeAudioData(wav.buffer);
+        if (!audioCtx || !gainNode) throw new Error("Web Audio API is unavailable");
+        let wavBuffer = wav instanceof ArrayBuffer ? wav : wav.buffer;
+        let buffer = await audioCtx.decodeAudioData(wavBuffer);
         let source = audioCtx.createBufferSource();
         source.buffer = buffer;
         source.connect(gainNode);
-        if (audioCtx.state === "suspended") audioCtx.resume();
+        if (audioCtx.state === "suspended") await audioCtx.resume().catch(() => {});
         source.start();
         // Synthesised lipsync over the SPOKEN duration. espeak pads the WAV with
         // trailing silence, so use the last non-silent sample as the end -
@@ -107,8 +187,11 @@ ttsWorker.addEventListener("message", async (e) => {
         task.onstart(source, lipTimings);
         source.addEventListener("ended", () => {
             task.onend();
+            tasks.delete(id);
         });
     } catch (err) {
-        task.onend();
+        console.error("BonziWORLD speech playback failed:", err);
+        workerBroken = true;
+        playBrowserFallback(id, {});
     }
 });

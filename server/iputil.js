@@ -50,6 +50,21 @@ export function parseIp(ip) {
 	return null;
 }
 
+export function canonicalizeIp(ip) {
+	const parsed = parseIp(ip);
+	if (!parsed) return null;
+	if (parsed.version === 4) {
+		return [24n, 16n, 8n, 0n]
+			.map(shift => Number((parsed.value >> shift) & 255n))
+			.join(".");
+	}
+	const groups = [];
+	for (let shift = 112n; shift >= 0n; shift -= 16n) {
+		groups.push(((parsed.value >> shift) & 65535n).toString(16).padStart(4, "0"));
+	}
+	return groups.join(":");
+}
+
 // "1.2.3.0/24" or bare "1.2.3.4" -> { version, start, end } (BigInt) or null.
 export function parseCidr(cidr) {
 	if (typeof cidr !== "string") return null;

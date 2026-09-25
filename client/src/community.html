@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="BonziWORLD Community Edition and Revived public asset browser.">
+    <title>Community Content - BonziWORLD</title>
+    <link rel="icon" href="./community-edition/icon/favicon.png">
+    <style>
+        :root { color-scheme: dark; font-family: Tahoma, Arial, sans-serif; background: #171225; color: #f7f3ff; }
+        * { box-sizing: border-box; } body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top, #563078, #171225 55%); }
+        .window { width: min(1200px, calc(100% - 24px)); margin: 12px auto; border: 2px solid #8b61c2; border-radius: 8px; overflow: hidden; box-shadow: 0 16px 48px #000a; background: #282033; }
+        header { display: flex; align-items: center; gap: 10px; padding: 9px 12px; background: linear-gradient(#8c5dc2, #4b216f); font-weight: bold; text-shadow: 1px 1px #1b092c; } header img { width: 22px; height: 22px; object-fit: contain; }
+        main { padding: 14px; } .intro { margin: 0 0 12px; color: #ded3ed; line-height: 1.4; } .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+        button, input { font: inherit; } button { cursor: pointer; color: #fff; border: 1px solid #aa8ed0; border-radius: 3px; padding: 7px 10px; background: linear-gradient(#69438e, #3b2457); }
+        button[aria-selected="true"] { background: linear-gradient(#a970db, #63358b); box-shadow: inset 0 0 0 1px #e7d7ff; } input { flex: 1 1 220px; min-width: 0; border: 1px solid #9d83bb; border-radius: 3px; padding: 7px 9px; background: #130d1c; color: #fff; }
+        #status { margin: 12px 0; color: #cdbde0; font-size: .9rem; } .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; } .card { min-width: 0; padding: 8px; border: 1px solid #59446e; border-radius: 4px; background: #20182a; }
+        .card img { display: block; width: 100%; height: 132px; object-fit: contain; background: repeating-conic-gradient(#251b31 0 25%, #1d1527 0 50%) 50% / 20px 20px; } .name { overflow-wrap: anywhere; margin: 8px 0 0; font-size: .82rem; line-height: 1.25; }
+        .audio-card { display: flex; flex-direction: column; gap: 8px; } .audio-card button { align-self: start; font-size: .82rem; padding: 5px 8px; } .empty { grid-column: 1 / -1; padding: 24px; text-align: center; color: #cdbde0; }
+        .open-link { align-self: start; color: #ead8ff; font-size: .82rem; }
+        @media (max-width: 520px) { .window { width: 100%; margin: 0; border-radius: 0; min-height: 100vh; } main { padding: 10px; } .grid { grid-template-columns: repeat(auto-fill, minmax(135px, 1fr)); } }
+    </style>
+    <script src="./community-manifest.js"></script>
+</head>
+<body>
+    <section class="window" aria-label="Community Content">
+        <header><img src="./community-edition/icon/favicon.png" alt=""> Community Content</header>
+        <main>
+            <p class="intro">Read-only public assets vendored from Community Edition and BonziWORLD Revived.</p>
+            <div class="toolbar" role="tablist" aria-label="Asset categories">
+                <button type="button" role="tab" aria-selected="true" data-tab="images">Community Edition agents</button>
+                <button type="button" role="tab" aria-selected="false" data-tab="communityAudio">Community Edition audio</button>
+                <button type="button" role="tab" aria-selected="false" data-tab="revivedAudio">BonziWORLD Revived audio</button>
+                <button type="button" role="tab" aria-selected="false" data-tab="allCommunityFiles">All CE content</button>
+                <input id="search" type="search" placeholder="Search file names" aria-label="Search assets">
+            </div>
+            <div id="status" aria-live="polite"></div><div id="assets" class="grid"></div>
+        </main>
+    </section>
+    <script>
+        (() => {
+            let activeTab = "images", activeAudio = null, visibleCount = 60;
+            const assets = document.getElementById("assets"), search = document.getElementById("search"), status = document.getElementById("status");
+            const displayName = (path) => path.replace(/^.*\//, "");
+            const isImage = (path) => /\.(?:png|jpe?g|gif|webp|svg)$/i.test(path);
+            const isAudio = (path) => /\.(?:mp3|wav|ogg|m4a)$/i.test(path);
+            function getAudioVolume() {
+                const saved = Number.parseFloat(localStorage.volume);
+                return Number.isFinite(saved) ? Math.min(Math.max(saved / 100, 0), 0.35) : 0.2;
+            }
+            function render() {
+                const query = search.value.trim().toLowerCase(); assets.replaceChildren(); status.textContent = "Loading assets…";
+                try {
+                    const matches = window.COMMUNITY_MANIFEST[activeTab].filter((path) => path.toLowerCase().includes(query));
+                    const paths = matches.slice(0, visibleCount);
+                    status.textContent = `${paths.length} of ${matches.length} asset${matches.length === 1 ? "" : "s"} shown`;
+                    if (!paths.length) assets.innerHTML = '<p class="empty">No matching assets.</p>';
+                    for (const path of paths) {
+                        const card = document.createElement("article"); card.className = "card";
+                        if (isImage(path)) { const image = document.createElement("img"); image.loading = "lazy"; image.src = `./${path}`; image.alt = displayName(path); card.append(image); }
+                        else if (isAudio(path)) {
+                            card.classList.add("audio-card"); const play = document.createElement("button"); play.type = "button"; play.textContent = "Play";
+                            play.onclick = () => {
+                                if (play.audio && !play.audio.paused) { play.audio.pause(); play.audio.currentTime = 0; play.textContent = "Play"; return; }
+                                if (activeAudio && activeAudio !== play.audio) { activeAudio.pause(); activeAudio.currentTime = 0; activeAudio.control.textContent = "Play"; }
+                                const audio = play.audio || (play.audio = new Audio(`./${path}`));
+                                audio.control = play; audio.volume = getAudioVolume(); activeAudio = audio; audio.currentTime = 0;
+                                audio.onended = () => { play.textContent = "Play"; if (activeAudio === audio) activeAudio = null; };
+                                audio.play().then(() => { play.textContent = "Stop"; }).catch(() => { play.textContent = "Play"; });
+                            };
+                            const stop = document.createElement("button"); stop.type = "button"; stop.textContent = "Stop"; stop.onclick = () => { if (play.audio) { play.audio.pause(); play.audio.currentTime = 0; } play.textContent = "Play"; }; card.append(play, stop);
+                        }
+                        else {
+                            const open = document.createElement("a"); open.className = "open-link"; open.href = `./${path}`; open.target = "_blank"; open.rel = "noopener"; open.textContent = "Open"; card.append(open);
+                        }
+                        const name = document.createElement("p"); name.className = "name"; name.textContent = path.replace(/^community-edition\//, "").replace(/^sfx\/revived\//, ""); card.append(name); assets.append(card);
+                    }
+                    if (paths.length < matches.length) {
+                        const more = document.createElement("button"); more.type = "button"; more.className = "more"; more.textContent = `Show 60 more (${matches.length - paths.length} remaining)`;
+                        more.onclick = () => { visibleCount += 60; render(); }; assets.append(more);
+                    }
+                } catch (error) { status.textContent = error.message; assets.innerHTML = '<p class="empty">The asset manifest could not be read.</p>'; }
+            }
+            document.querySelectorAll("[data-tab]").forEach((tab) => tab.onclick = () => { activeTab = tab.dataset.tab; visibleCount = 60; document.querySelectorAll("[data-tab]").forEach((item) => item.setAttribute("aria-selected", item === tab)); render(); });
+            search.oninput = () => { visibleCount = 60; render(); }; render();
+        })();
+    </script>
+</body>
+</html>

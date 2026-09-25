@@ -22,7 +22,13 @@ export function spawnRestartChild() {
 			windowsHide: true,
 		});
 	} else {
-		child = spawn(process.execPath, [startScript], {
+		child = spawn("/bin/sh", [
+			"-c",
+			"sleep 1; exec \"$1\" \"$2\"",
+			"bonziworld-restart",
+			process.execPath,
+			startScript,
+		], {
 			cwd: __dirname,
 			detached: true,
 			stdio: "inherit",

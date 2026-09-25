@@ -33,6 +33,21 @@
     ],
     "codes": [
         {
+            "matches": "^wrong\\.?$",
+            "response": { "tag": "g1", "text": "This password is too shortest." }
+        },
+        {
+            "tag": "g1",
+            "matches": "^too\\s+shortest\\.?$",
+            "response": { "tag": "g2", "text": "Please try again tomorrow." }
+        },
+        {
+            "tag": "g2",
+            "matches": "^again\\s+tomorrow\\.?$",
+            "unlocks": "glitchyhat",
+            "response": "<font color=lime>Your password is correct."
+        },
+        {
             "matches": "^incorrect\\.?$",
             "tag": "i1",
             "response": { "tag": "i2", "text": "<font color=orange>The password is too short." }
@@ -99,11 +114,6 @@
             "unlocks": "redhat",
             "response": "red"
         },
-         {
-            "matches": "ifeelsorainbow",
-            "unlocks": "rainbowhat",
-            "response": "wow!"
-        },
         {
             "matches": "myhatispurple",
             "unlocks": "purplehat",
@@ -123,16 +133,6 @@
             "matches": "myhatisyellow",
             "unlocks": "yellowhat",
             "response": "yellow"
-        },
-        {
-            "matches": "zegoldhat",
-            "unlocks": "goldhat",
-            "response": "gold"
-        },
-        {
-            "matches": "diamondhat",
-            "unlocks": "diamondhat",
-            "response": "diamond"
         },
         {
             "matches": "zegoldenhat",

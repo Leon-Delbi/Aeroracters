@@ -1,7 +1,9 @@
 export function getPublicRankFlags(runlevel) {
   return {
     runlevel,
-    radical: runlevel === 7,
+    bigowner: runlevel === 8,
+    owner: runlevel === 7,
+    radical: runlevel === 7.5,
     developer: runlevel === 6,
     contributor: runlevel === 5,
     dj: runlevel === 1.75,

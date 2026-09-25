@@ -1,0 +1,57 @@
+/* PlayStation 2-inspired theme */
+:root {
+    --ps2-blue: #2368ff;
+    --ps2-deep: #020315;
+}
+
+@keyframes ps2-towers {
+    from { background-position: center, 0 0, 0 0; }
+    to { background-position: center, 96px -64px, -96px 64px; }
+}
+
+#content {
+    background-color: var(--ps2-deep);
+    background-image:
+        radial-gradient(ellipse at center, #17318988 0, #050722 44%, #01010a 78%),
+        repeating-linear-gradient(90deg, transparent 0 31px, #315cff28 32px 33px),
+        repeating-linear-gradient(0deg, transparent 0 31px, #315cff20 32px 33px);
+    animation: ps2-towers 18s linear infinite;
+}
+
+#chat_bar {
+    background: linear-gradient(#111b4f, #05071c 55%, #173d9a);
+    border-top: 1px solid #739bff;
+}
+
+#start_button, #chat_send {
+    background-image: none;
+    background: linear-gradient(135deg, #1b43bd, #07113f);
+    border: 1px solid #7ca2ff;
+    border-radius: 2px;
+}
+
+.window_header {
+    background: linear-gradient(90deg, #06091f, #244bbd, #07102f);
+    border-color: #6b8cff;
+    color: white;
+    text-shadow: 0 0 5px #7aa5ff;
+}
+
+.window_body, #start_menu_body, .bubble, .bonzi_name, .bonzi_tag {
+    background: linear-gradient(145deg, #f5f7ff, #aeb9d8);
+    border-color: #263c7a;
+}
+
+#start_menu {
+    filter: hue-rotate(190deg) saturate(1.6) brightness(.72);
+}
+
+#page_login {
+    background:
+        radial-gradient(circle at 50% 45%, #1d3d9c 0, #070923 38%, #010108 75%);
+}
+
+#login_card, #login_readme {
+    border: 1px solid #698dff;
+    box-shadow: 0 0 18px #265cff;
+}

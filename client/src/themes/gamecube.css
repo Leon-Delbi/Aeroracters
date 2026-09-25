@@ -1,0 +1,54 @@
+/* Nintendo GameCube-inspired theme */
+:root {
+    --gc-purple: #6545a8;
+    --gc-dark: #21153c;
+}
+
+@keyframes gamecube-grid {
+    from { background-position: center, 0 0; }
+    to { background-position: center, 64px 64px; }
+}
+
+#content {
+    background:
+        radial-gradient(circle at 50% 42%, #9a7be055 0, #3d276f 35%, #180f2e 78%),
+        linear-gradient(45deg, #ffffff0b 25%, transparent 25% 75%, #ffffff0b 75%);
+    background-size: auto, 64px 64px;
+    animation: gamecube-grid 12s linear infinite;
+}
+
+#chat_bar {
+    background: linear-gradient(#7357b5, #33215d);
+    border-top: 2px solid #a991e1;
+}
+
+#start_button, #chat_send {
+    background-image: none;
+    background: linear-gradient(135deg, #9d83d8, #4a317f);
+    border: 2px solid #c9b8ef;
+    border-radius: 10px 3px 10px 3px;
+}
+
+.window_header {
+    background: linear-gradient(90deg, #35215e, #7658b6, #2a194c);
+    border-color: #b8a1e5;
+    color: white;
+}
+
+.window_body, #start_menu_body, .bubble, .bonzi_name, .bonzi_tag {
+    background: linear-gradient(135deg, #f5f2fa, #cbc1dd);
+    border-color: #4d3679;
+}
+
+#start_menu {
+    filter: hue-rotate(255deg) saturate(1.15);
+}
+
+#page_login {
+    background: radial-gradient(circle at center, #7254ad, #2b194e 58%, #120a22);
+}
+
+#login_card, #login_readme {
+    border: 2px solid #a68bdc;
+    box-shadow: 0 0 18px #bca0ff88;
+}

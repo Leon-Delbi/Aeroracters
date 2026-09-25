@@ -2,11 +2,94 @@ import * as fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import os from "node:os";
+import { spawn } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const projectDir = path.resolve(__dirname, "..");
+let sourceArchive;
+
+const SOURCE_EXTENSIONS = new Set([
+".css", ".html", ".js", ".json", ".md", ".txt", ".xml",
+]);
+const SOURCE_EXCLUDED_PATHS = new Set([
+"bans.json",
+"client/src/community-edition",
+	"server/antiFlood.js",
+	"server/evilisp.js",
+	"server/evilisp.txt",
+	"server/pow.d.ts",
+	"server/pow.js",
+	"server/proxyblock.js",
+"server/snapshots",
+]);
+
+function collectSourceFiles(directory, relativeDirectory = "") {
+const files = [];
+for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+if (entry.name.startsWith(".") || entry.name === "node_modules" || entry.name === "build") continue;
+const relativePath = path.join(relativeDirectory, entry.name);
+if (SOURCE_EXCLUDED_PATHS.has(relativePath)) continue;
+const absolutePath = path.join(directory, entry.name);
+if (entry.isDirectory()) {
+files.push(...collectSourceFiles(absolutePath, relativePath));
+continue;
+}
+const isPublicClientAsset = relativePath.startsWith(path.join("client", "src") + path.sep);
+if (isPublicClientAsset || SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
+files.push(relativePath);
+}
+}
+return files;
+}
+
+function getSourceArchiveManifest() {
+const files = collectSourceFiles(projectDir).sort();
+const signature = files.map(relativePath => {
+const stat = fs.statSync(path.join(projectDir, relativePath));
+return `${relativePath}:${stat.size}:${stat.mtimeMs}`;
+}).join("\n");
+return { files, signature };
+}
+
+function ensureSourceArchive() {
+const { files, signature } = getSourceArchiveManifest();
+if (sourceArchive?.signature === signature) return sourceArchive.promise;
+
+const archivePath = path.join(
+os.tmpdir(),
+`bonziworld-source-${process.pid}-${crypto.createHash("sha256").update(signature).digest("hex").slice(0, 16)}.zip`,
+);
+const archive = { signature, promise: null };
+archive.promise = new Promise((resolve, reject) => {
+// `zip` updates an existing archive without removing entries that are no
+// longer in the source list. Always begin with a clean file so a reused PID or
+// hot restart cannot leave hundreds of stale files in the download.
+fs.rmSync(archivePath, { force: true });
+const zip = spawn("zip", ["-q", archivePath, "-@"], {
+cwd: projectDir,
+stdio: ["pipe", "ignore", "pipe"],
+});
+let errorOutput = "";
+zip.stderr.on("data", chunk => {
+errorOutput += chunk.toString().slice(0, 1000);
+});
+zip.on("error", reject);
+zip.on("close", code => {
+if (code === 0) resolve(archivePath);
+else reject(new Error(`Source archive creation failed (${code}): ${errorOutput}`));
+});
+zip.stdin.end(files.join("\n"));
+}).catch(error => {
+if (sourceArchive === archive) sourceArchive = undefined;
+throw error;
+});
+sourceArchive = archive;
+return archive.promise;
+}
 import express from "express";
 import sharp from "sharp";
-import { cookieParser, signPass } from "./utils.js";
+import { cookieParser } from "./utils.js";
 import { beat } from "./server.js";
 import "./discordbot.js"; // Discord bot (beta) — self-starts if DISCORD_BOT_TOKEN is set
 import { app, io, server } from "./app.js";
@@ -36,15 +119,44 @@ app.use((req, res, next) => {
 		path: "/",
 	};
 	res.cookie("token", randomToken, cookieOpts);
-	// Signed proof that this client actually loaded the page over HTTP. The
-	// socket handshake guard (floodGuard) requires it, so off-site flood scripts
-	// that connect straight to the socket — without ever fetching the page —
-	// never receive it and are refused, even if they spoof the Origin header.
-	res.cookie("pass", signPass(randomToken), cookieOpts);
 	next();
 });
 
-app.use(express.static('../build/www'));
+app.get("/source-code.zip", async (_req, res) => {
+try {
+const archivePath = await ensureSourceArchive();
+res.setHeader("Cache-Control", "no-store");
+res.download(archivePath, "bonziworld-1.8.10-source.zip");
+} catch (error) {
+console.error("Unable to create source archive:", error);
+res.status(500).type("text/plain").send("The source archive could not be created.");
+}
+});
+
+const errorPageDirectory = path.resolve(__dirname, "../client/src");
+const errorPageCodes = [400, 403, 404, 500, 502, 503];
+
+function sendErrorPage(res, statusCode) {
+	res
+		.status(statusCode)
+		.set("Cache-Control", "no-store")
+		.sendFile(path.join(errorPageDirectory, `${statusCode}.html`));
+}
+
+// Keep the static error documents useful both as conventional custom-error
+// files and as directly testable routes. A reverse proxy may serve the files
+// itself for an upstream 403/502/503, while app-originated errors use these
+// routes when the Node server is available.
+for (const statusCode of errorPageCodes) {
+	app.get([`/${statusCode}`, `/${statusCode}.html`], (_req, res) => {
+		sendErrorPage(res, statusCode);
+	});
+}
+
+// Resolve static directories from this file instead of the process working
+// directory. This keeps the page and Socket.IO client assets available whether
+// the server is started from `server/` or from the project root.
+app.use(express.static(path.resolve(__dirname, "../build/www")));
 
 app.get("/discord_pfp/:layers", async (req, res) => {
 	try {
@@ -92,7 +204,20 @@ app.use((_req, res, next) => {
 	next();
 });
 
-app.use(express.static("../client/src"));
+app.use(express.static(path.resolve(__dirname, "../client/src")));
+
+app.use((req, res) => {
+	if (req.accepts("html")) {
+		return sendErrorPage(res, 404);
+	}
+	res.status(404).type("text/plain").send("Not found");
+});
+
+app.use((error, _req, res, next) => {
+	if (res.headersSent) return next(error);
+	console.error("Unhandled request error:", error);
+	sendErrorPage(res, 500);
+});
 
 await beat();
 

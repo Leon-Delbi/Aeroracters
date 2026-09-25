@@ -113,6 +113,50 @@ gay-greenoutline {
         0 0 10px #00cc44;
 }
 
+gay-blueglow,
+gay-redglow {
+    color: #000;
+}
+
+gay-blueglow {
+    text-shadow:
+        -1px -1px 0 #0000ff,
+        1px -1px 0 #0000ff,
+        -1px 1px 0 #0000ff,
+        1px 1px 0 #0000ff,
+        0 0 2px #0000aa,
+        0 0 6px #0000ff,
+        0 0 10px #0000ff;
+}
+
+gay-redglow {
+    text-shadow:
+        -1px -1px 0 #ff0000,
+        1px -1px 0 #ff0000,
+        -1px 1px 0 #ff0000,
+        1px 1px 0 #ff0000,
+        0 0 2px #aa0000,
+        0 0 6px #ff0000,
+        0 0 10px #ff0000;
+}
+
+horror-blue,
+horror-green {
+    display: inline-block;
+    font-weight: bold;
+    letter-spacing: 0.02em;
+}
+
+horror-blue {
+    color: #000022;
+    text-shadow: 0 0 2px #000, 0 0 8px #0000ff;
+}
+
+horror-green {
+    color: #002200;
+    text-shadow: 0 0 2px #000, 0 0 8px #00ff00;
+}
+
 gay-fancy {
     display: inline-block;
     font-family: "Brush Script MT", "Lucida Handwriting", "Segoe Script", "Snell Roundhand", "Apple Chancery", cursive;

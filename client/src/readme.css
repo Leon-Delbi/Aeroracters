@@ -101,6 +101,20 @@ gay-rainbow {
     animation: move 2s linear infinite;
 }
 
+gay-rainbowglow {
+    background-image: linear-gradient(120deg in hsl longer hue, red, red, red);
+    background-size: 500px;
+    background-clip: text;
+    color: transparent;
+    text-shadow:
+        0 0 2px #ff0000,
+        0 0 5px #ffff00,
+        0 0 8px #00ff00,
+        0 0 11px #00ffff,
+        0 0 14px #ff00ff;
+    animation: move 2s linear infinite;
+}
+
 gay-greenoutline {
     color: #000;
     text-shadow:
@@ -111,6 +125,50 @@ gay-greenoutline {
         0 0 2px #0a0,
         0 0 6px #00ff66,
         0 0 10px #00cc44;
+}
+
+gay-blueglow,
+gay-redglow {
+    color: #000;
+}
+
+gay-blueglow {
+    text-shadow:
+        -1px -1px 0 #0000ff,
+        1px -1px 0 #0000ff,
+        -1px 1px 0 #0000ff,
+        1px 1px 0 #0000ff,
+        0 0 2px #0000aa,
+        0 0 6px #0000ff,
+        0 0 10px #0000ff;
+}
+
+gay-redglow {
+    text-shadow:
+        -1px -1px 0 #ff0000,
+        1px -1px 0 #ff0000,
+        -1px 1px 0 #ff0000,
+        1px 1px 0 #ff0000,
+        0 0 2px #aa0000,
+        0 0 6px #ff0000,
+        0 0 10px #ff0000;
+}
+
+horror-blue,
+horror-green {
+    display: inline-block;
+    font-weight: bold;
+    letter-spacing: 0.02em;
+}
+
+horror-blue {
+    color: #000022;
+    text-shadow: 0 0 2px #000, 0 0 8px #0000ff;
+}
+
+horror-green {
+    color: #002200;
+    text-shadow: 0 0 2px #000, 0 0 8px #00ff00;
 }
 
 gay-fancy {
@@ -264,6 +322,33 @@ horror-fx {
   font-weight: bold;
   letter-spacing: 0.02em;
   animation: horror-flicker 0.45s steps(2, end) infinite;
+}
+
+@keyframes horror-flicker-rainbow {
+  0%, 100% {
+    transform: translate(0, 0) scale(1);
+    text-shadow: 0 0 2px #000, 0 0 6px #ff0000, 0 0 10px #00ffff;
+  }
+  25% {
+    transform: translate(-1px, 1px) scale(1.01);
+    text-shadow: 0 0 3px #000, 0 0 8px #ffff00, 0 0 12px #ff00ff;
+  }
+  50% {
+    transform: translate(1px, -1px) scale(0.99);
+    text-shadow: 0 0 2px #000, 0 0 10px #00ff00, 0 0 14px #0000ff;
+  }
+  75% {
+    transform: translate(-1px, 0) scale(1.02);
+    text-shadow: 0 0 4px #000, 0 0 6px #ff00ff, 0 0 12px #ff7700;
+  }
+}
+
+horror-rainbow {
+  display: inline-block;
+  color: #220022;
+  font-weight: bold;
+  letter-spacing: 0.02em;
+  animation: horror-flicker-rainbow 0.45s steps(2, end) infinite;
 }
 
 @keyframes move {

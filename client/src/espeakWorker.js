@@ -1,10 +1,7 @@
 
 let createWav;
-
-let resolveReady;
-let ready = new Promise((res) => {
-    resolveReady = res;
-});
+let initializationError = null;
+const workerBaseUrl = new URL("./", import.meta.url);
 
 function timestamps() {
     return {
@@ -31,10 +28,10 @@ function timestamps() {
             "phonindex",
             "intonations",
             "en_dict",
-            "lang/gmw/en-US",
+            "lang/gmw/en-us",
         ]));
-        let speakNgBuffer = await fetch("/speak-ng.wasm").then((res) => res.arrayBuffer());
-        let { WASI } = await import("/lib/runno.js");
+        let speakNgBuffer = await fetchAsset("speak-ng.wasm", "arrayBuffer");
+        let { WASI } = await import(new URL("./lib/runno.js", import.meta.url).href);
         async function play(text, options = {}) {
             let wasi = new WASI({
                 args: [
@@ -80,8 +77,8 @@ function timestamps() {
                         mode: "binary",
                         content: en_dict,
                     },
-                    "/espeak/lang/gmw/en-US": {
-                        path: "/espeak/lang/gmw/en-US",
+                    "/espeak/lang/gmw/en-us": {
+                        path: "/espeak/lang/gmw/en-us",
                         ...timestamps(),
                         mode: "binary",
                         content: en_US,
@@ -96,22 +93,38 @@ function timestamps() {
         }
         createWav = play;
     }
-    main().then(() => {
-        resolveReady();
+    var ready = main().catch((error) => {
+        initializationError = error;
+        throw error;
     });
 }
 
 function espeakFetch(arr) {
     return arr.map((url) => {
-        return fetch(`/espeak-ng-data/${url}`)
-            .then(data => data.arrayBuffer())
+        return fetchAsset(`espeak-ng-data/${url}`, "arrayBuffer")
             .then(data => new Uint8Array(data));
     });
 }
 
 onmessage = async (e) => {
-    await ready;
     let { id, text, options } = e.data;
-    let wav = await createWav(text, options);
-    postMessage({ id, wav }, [wav.buffer]);
+    try {
+        await ready;
+        if (!createWav) throw initializationError || new Error("Speech engine did not initialize");
+        let wav = await createWav(text, options);
+        postMessage({ id, wav }, [wav.buffer]);
+    } catch (error) {
+        postMessage({
+            id,
+            error: error instanceof Error ? error.message : String(error),
+        });
+    }
 };
+
+async function fetchAsset(relativePath, responseType) {
+    const response = await fetch(new URL(relativePath, workerBaseUrl));
+    if (!response.ok) {
+        throw new Error(`Speech asset failed to load (${response.status}): ${relativePath}`);
+    }
+    return response[responseType]();
+}

@@ -8,25 +8,106 @@ import * as db from "./database.js";
 import z from "zod";
 import crypto from "crypto";
 import { createHash } from "node:crypto";
-import { isCloudflare, isLocal, parseIp, makeCidrMatcher } from "./iputil.js";
-import { isProxy } from "./proxyblock.js";
-import { isEvilIsp } from "./evilisp.js";
+import { canonicalizeIp, isCloudflare, isLocal, parseIp, makeCidrMatcher } from "./iputil.js";
 import { getPublicRankFlags } from "./rankIcons.js";
+import { parseRedirectUrl } from "./redirect.js";
+import {
+BAN_DURATIONS_MS,
+MUTE_DURATION_MS,
+moderationMinimumRunlevel,
+parseModerationRequest,
+} from "./moderation.js";
 import net from 'net';
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnRestartChild } from "./restart.js";
-import { getAsn, addAsnBan, removeAsnBan } from "./asnbans.js";
+import {
+	loadServerEnv,
+	permanentPromotionAlertUrl,
+	restoredSafetyAlertUrl,
+} from "./env.js";
+import {
+	createSafetyActivationCommandHandlers,
+	restoreSafetyAtStartup,
+	sendPermanentPromotionFailureAlert,
+} from "./restoredSafetyAlert.js";
+import {
+	canBypassOwnerLockdown,
+	canRunServerManagementCommand,
+	createCooldownStorageDiagnosticReporter,
+	createGodmodeCommandHandlers,
+	createLiveCooldownCoordinationHealth,
+	createPermanentPromotionFailureReporter,
+	createServerStatusCommandHandler,
+	dispatchUserCommandHandler,
+	formatCommandLog,
+parseMassBanRequest,
+parseMassDemoteRequest,
+	resolveUserCommandHandler,
+	ResetConfirmationGate,
+	restorePermanentPromotionAlertCooldown,
+	routeRestoredSafetyLogin,
+selectMassDemoteTargets,
+selectMassBanTargets,
+	restoredSafetyStartupMessage,
+	SERVER_MANAGEMENT_COMMANDS,
+	validateUserCommandTable,
+} from "./ownerSafety.js";
+import {
+createWordFilterStore,
+WORD_FILTER_CATEGORIES,
+} from "./wordFilters.js";
+import { buildGodmodeTrackerPage } from "./godmodeTracker.js";
 
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const joke2Jokes = JSON.parse(readFileSync(path.resolve(__dirname, "..", "client", "src", "joke2.json"), "utf8"));
+const fact2Facts = JSON.parse(readFileSync(path.resolve(__dirname, "..", "client", "src", "fact2.json"), "utf8"));
+const wtfQuotes = [
+	"i said /godmode password and it didnt work",
+	"please make pope free",
+	"100. Continue.",
+	"418. I'm a teapot.",
+	"i installed BonziBUDDY on my pc and now i have a virus",
+	"i deleted system32",
+	"i flood servers, and that makes me cool.",
+	"i still use the Wii U",
+	"i bricked my Wii",
+	"i copy other people's usernames",
+	"CAN U PLZ UNBAN ME PLZ PLZ PLZ PLZ PLZ PLZ PLZ",
+	"i am so cool. i shit on people, add reactions that make fun of users on discord, and abuse my admin powers.",
+	"how to make a bonziworld server?",
+	"no u",
+	"Sorry, i don't want you anymore.",
+	"I am getting fucking tired of you using this command. Fucking take a break already!",
+	"DeviantArt",
+	"javascript",
+	"moo!",
+	"Hi.",
+	"i watch numberblocks",
+	"i used inspect element to change your name so i can bully you",
+	"i can ban you, my dad is seamus",
+	"i like to imagine that i am getting so fat for no reason at all",
+	"i used grounded threats and now i got hate",
+	"i watch nature on PBS",
+	"i pee my pants",
+	"Fun Fact: You're a fucking asshole",
+	"Do you know how much /wtf quotes there are?",
+	"Yeah, of course {NAME} wants me to use /wtf. Hah hah! Look at the stupid {COLOR} Microsoft Agent character embarrassing himself! Fuck you. It isn't funny.",
+	"Damn, {NAME} really likes /wtf",
+];
 
 app.use(express.json());
-const activeChallenges = new Map();
 
 function sha256(str) {
-    return createHash("sha256").update(str).digest("hex");
+    return createHash("sha256").update(String(str ?? ""), "utf8").digest("hex");
+}
+
+function configuredSecretHash(value) {
+    const configured = String(value ?? "").trim();
+    return /^[a-f0-9]{64}$/i.test(configured)
+        ? configured.toLowerCase()
+        : sha256(configured);
 }
 
 async function setCloudflareSecurityLevel(value) {
@@ -44,58 +125,7 @@ async function setCloudflareSecurityLevel(value) {
     });
 }
 
-import { loadServerEnv } from "./env.js";
-
 loadServerEnv(__dirname);
-
-function suspiciousPowUserAgent(headers) {
-    let ua = String(headers["user-agent"] || "").toLowerCase();
-    if (!ua) return false;
-    let isNode = ua.includes("node.js") || ua.includes("nodejs") || /\bnode\b/.test(ua);
-    let familiarBrowser = ua.includes("chrom") || ua.includes("firefox");
-    return isNode && !familiarBrowser;
-}
-
-// Non-browser / automation / scraper user-agent signatures. Real browsers never
-// carry these, so a handshake bearing one (or no UA at all) is treated as a bad
-// bot. NOTE: deliberately omits "electron" so the desktop client (an Electron
-// app) still gets in.
-const BAD_UA_SIGNATURES = [
-    "bot", "crawler", "spider", "scrape", "headless", "phantomjs",
-    "selenium", "puppeteer", "playwright", "cypress", "webdriver",
-    "curl", "wget", "libwww", "python", "java/", "jakarta", "perl",
-    "go-http-client", "okhttp", "node-fetch", "axios", "undici", "got (",
-    "httpclient", "httpie", "postman", "insomnia", "restsharp", "winhttp",
-    "masscan", "zgrab", "nmap", "nikto", "sqlmap", "gobuster", "dirbuster",
-    "semrush", "ahrefs", "mj12", "dotbot", "petalbot", "bytespider", "censys",
-];
-
-// Decides whether a handshake is a "bad bot" purely from its User-Agent: an
-// empty UA, a UA that isn't a real browser (browsers all start "Mozilla/"), or
-// one carrying any of the automation/scraper signatures above. Used by the
-// handshake guard to refuse entry to dangerous bots before they reach login.
-function isBadBot(headers) {
-    let ua = String(headers["user-agent"] || "").trim().toLowerCase();
-    if (!ua) return true;                          // browsers always send a UA
-    if (!ua.startsWith("mozilla/")) return true;   // every mainstream browser does
-    return BAD_UA_SIGNATURES.some((sig) => {
-        if (sig === "bot") {
-            return /(?:^|[^a-z])bot(?:$|[^a-z])/.test(ua);
-        }
-        return ua.includes(sig);
-    });
-}
-
-function powDifficultyFor(headers, level) {
-    let difficulty = level >= 4 ? 4 : level >= 3 ? 3 : 2;
-    if (suspiciousPowUserAgent(headers)) difficulty++;
-    return Math.max(1, Math.min(difficulty, 8));
-}
-
-function powStagesFor(level) {
-    return level >= 4 ? 3 : level >= 3 ? 2 : level >= 2 ? 1 : 0;
-}
-
 
 // Extra trusted reverse proxies, configurable via env (comma-separated CIDRs).
 const isExtraTrustedProxy = makeCidrMatcher(
@@ -113,24 +143,85 @@ let djs = sha256(process.env.DJWORD);
 let popewords = sha256(process.env.GODWORD);
 let developers = sha256(process.env.DEVELOPER);
 let contributors = sha256(process.env.CONTRIBUTOR);
-let radz = sha256(process.env.RADICALGREEN);
+// Normal Owners are granted only through Big Owner promotion. This marker
+// restores that persisted role but is deliberately not accepted by /godmode.
+const ownerRankWord = sha256("bonziworld:persisted-owner:v1");
+const radicalRankWord = sha256("bonziworld:persisted-radical:v1");
+let bigOwnerWord = process.env.BIG_OWNER_GODWORD
+	? configuredSecretHash(process.env.BIG_OWNER_GODWORD)
+	: null;
+
+function persistedRankTag(storedHash) {
+	if (storedHash === janitors) return "Janitor";
+	if (storedHash === djs) return "DJ";
+	if (storedHash === lowerKings) return "Low King";
+	if (storedHash === higherKings) return "High King";
+	if (storedHash === popewords) return "Pope";
+	if (storedHash === contributors) return "Contributor";
+	if (storedHash === developers) return "Developer";
+	if (storedHash === radicalRankWord) return "Radical";
+	if (storedHash === ownerRankWord) return "Owner";
+	if (bigOwnerWord && storedHash === bigOwnerWord) return "Big Owner";
+	return "";
+}
 
 let pendingMedia = new Map(); // msgid -> { type, url, guid, room, user, msgid }
+let maintenanceMode = false;
+let emergencyLockdown = false;
+const resetConfirmations = new ResetConfirmationGate();
+const massDemoteConfirmations = new ResetConfirmationGate();
+const massBanConfirmations = new ResetConfirmationGate();
+let tempBans = new Map();
+const mutedIps = new Map();
+const shadowbannedIps = new Map();
 
 function normalizeIp(ip) {
 	if (typeof ip !== "string") return "";
 	let s = ip.trim();
 	if (!s) return "";
-	if (/^::ffff:/i.test(s) && s.includes(".")) {
-		s = s.slice(s.lastIndexOf(":") + 1);
+	return canonicalizeIp(s) || s.toLowerCase();
+}
+
+// Keep real network addresses available to the server's abuse-prevention
+// checks, but expose only a stable pseudonymous identifier to admin views and
+// integrations. This is deliberately not IP spoofing: it does not alter the
+// address used by the operating system or any upstream proxy.
+let _ipMaskKey = null;
+function ipMaskKey() {
+	if (_ipMaskKey) return _ipMaskKey;
+	// Reuse the existing server-session key rather than maintaining a separate
+	// IP-mask password. The domain separator prevents cross-protocol key reuse.
+	const sessionSecret = String(process.env.SESSION_SECRET || "");
+	_ipMaskKey = createHash("sha256")
+		.update(`bonziworld-ip-mask:v1:${sessionSecret}`)
+		.digest();
+	return _ipMaskKey;
+}
+
+function randomizedIp(ip) {
+const normalized = normalizeIp(ip);
+if (!normalized) return "anon:unknown";
+if (process.env.RANDOMIZE_IPS === "false") return normalized;
+const digest = crypto.createHmac("sha256", ipMaskKey()).update(normalized).digest("hex");
+return `anon:${digest.slice(0, 32)}`;
+}
+
+function socketCookie(socket, name) {
+	const header = String(socket?.handshake?.headers?.cookie || "");
+	for (const part of header.split(";")) {
+		const separator = part.indexOf("=");
+		if (separator === -1) continue;
+		const key = part.slice(0, separator).trim();
+		if (key === name) return part.slice(separator + 1).trim();
 	}
-	if (s.includes(".") && !s.includes(":")) {
-		const parts = s.split(".");
-		if (parts.length === 4) {
-			return parts.map((p) => String(Number(p))).join(".");
-		}
-	}
-	return s.toLowerCase();
+	return "";
+}
+
+function hardbanFingerprint(cookie) {
+	if (!cookie) return "";
+	return crypto.createHmac("sha256", ipMaskKey())
+		.update(`hardban:${cookie}`)
+		.digest("hex");
 }
 
 function extractForwardedIp(headers) {
@@ -170,62 +261,29 @@ export function socketIp(socket) {
 	return normalizedPeer;
 }
 
-app.use((req, res, next) => {
-    const level = parseInt(req.query.level) || 1;
-
-    req.pow = {
-        difficulty: powDifficultyFor(req.headers, level),
-        stages: powStagesFor(level)
-    };
-
-    next();
-});
-
-app.get('/api/challenge', (req, res) => {
-    const seed = crypto.randomBytes(16).toString('hex');
-
-    activeChallenges.set(seed, {
-        difficulty: req.pow.difficulty,
-        stages: req.pow.stages,
-        expiresAt: Date.now() + 60000
-    });
-
-    res.json({
-        difficulty: req.pow.difficulty,
-        stages: req.pow.stages,
-        seed: seed
-    });
-});
-
-app.post('/api/verify', (req, res) => {
-    const { seed, nonce } = req.body;
-    const challenge = activeChallenges.get(seed);
-
-    if (!challenge || challenge.expiresAt < Date.now()) {
-        return res.status(400).json({ error: "Invalid or expired challenge" });
-    }
-
-    const hash = crypto.createHash('sha256').update(seed + nonce).digest('hex');
-    const targetPrefix = '0'.repeat(challenge.difficulty);
-
-    if (!hash.startsWith(targetPrefix)) {
-        return res.status(400).json({ error: "Invalid solution" });
-    }
-
-    activeChallenges.delete(seed);
-    res.json({ success: true });
-});
+function requestNetworkIp(req) {
+	const peer = normalizeIp(req.socket?.remoteAddress || "");
+	if (process.env.USE_X_REAL_IP !== "false" && isTrustedProxy(peer)) {
+		const forwarded = extractForwardedIp(req.headers);
+		if (forwarded) return forwarded;
+	}
+	return peer;
+}
 
 function godwordRunlevel(godword) {
-	    if (godword === janitors) return 1.05;
-	    if (godword === lowerKings) return 2;
-	    if (godword === higherKings) return 3;
-			if (godword === djs) return 1.75;
-	    if (godword === popewords) return 4;
-	    if (godword === contributors) return 5;
-	    if (godword === developers) return 6;
-    const hashed = sha256(godword);
-    if (hashed === process.env.RADICALGREEN) return 7;
+    const hashed = /^[a-f0-9]{64}$/i.test(String(godword))
+        ? String(godword).toLowerCase()
+        : sha256(godword);
+    if (hashed === janitors) return 1.05;
+    if (hashed === lowerKings) return 2;
+    if (hashed === higherKings) return 3;
+    if (hashed === djs) return 1.75;
+    if (hashed === popewords) return 4;
+    if (hashed === contributors) return 5;
+    if (hashed === developers) return 6;
+    if (hashed === radicalRankWord) return 7.5;
+    if (hashed === ownerRankWord) return 7;
+    if (bigOwnerWord && hashed === bigOwnerWord) return 8;
     return 0;
 }
 
@@ -270,37 +328,24 @@ app.post("/vault", express.json(), async (req, res) => {
 	return;
 });
 
-// Message/command filters from settings.json. Each key is a regex (carrying its
-// own case / obfuscation variants); the value replaces matches. Compiled with the
-// unicode-sets flag. STRENGTHENED: a filter that fails to compile is skipped and
-// logged instead of throwing at startup and taking the whole server down (which
-// is what used to happen), and censor() is null-safe.
-let filters = [];
-for (const [pattern, replacement] of Object.entries(settings.filters || {})) {
-	try {
-		filters.push({ regex: new RegExp(pattern, "gv"), replacement });
-	} catch (e) {
-		console.error(`censor: skipping invalid filter ${JSON.stringify(String(pattern).slice(0, 40))}: ${e.message}`);
-	}
-}
+const wordFilterStore = createWordFilterStore({
+	defaults: {
+		filters: settings.filters || {},
+		namefilters: settings.namefilters || {},
+		antigodwordleak: settings.antigodwordleak || {},
+	},
+	filePath: path.resolve(__dirname, "managed-word-filters.json"),
+	onInvalidPattern({ category, pattern, error }) {
+		console.error(
+			`censor: skipping invalid ${category} filter ${JSON.stringify(pattern)}: ${error.message}`,
+		);
+	},
+});
 
-let filterse = [];
-for (const [pattern, replacement] of Object.entries(settings.namefilters || {})) {
-	try {
-		filterse.push({ regex: new RegExp(pattern, "gv"), replacement });
-	} catch (e) {
-		console.error(`censor: skipping invalid filter ${JSON.stringify(String(pattern).slice(0, 40))}: ${e.message}`);
-	}
-}
-
-let filtersa = [];
-for (const [pattern, replacement] of Object.entries(settings.antigodwordleak || {})) {
-	try {
-		filtersa.push({ regex: new RegExp(pattern, "gv"), replacement });
-	} catch (e) {
-		console.error(`censor: skipping invalid filter ${JSON.stringify(String(pattern).slice(0, 40))}: ${e.message}`);
-	}
-}
+const compiledWordFilters = wordFilterStore.getCompiled();
+let filters = compiledWordFilters.messages;
+let filterse = compiledWordFilters.usernames;
+let filtersa = compiledWordFilters.godword;
 
 function censor(txt) {
 	if (typeof txt !== "string") return txt;
@@ -325,13 +370,35 @@ function antileak(txt) {
 	return txt;
 }
 
+function wordFilterManagerData(category, notice = "") {
+	return {
+		...wordFilterStore.getCategory(category),
+		categories: WORD_FILTER_CATEGORIES.map(({ id, label }) => ({ id, label })),
+		notice,
+	};
+}
+
 let rooms = new Map();
 
 
-
 export async function beat() {
+	const alertDestination = restoredSafetyAlertUrl();
+	await restoreSafetyAtStartup({
+		loadState: () => db.loadServerSafetyState(),
+		applyState: safetyState => {
+			maintenanceMode = safetyState.maintenance;
+			emergencyLockdown = safetyState.emergencyLockdown;
+		},
+		destination: alertDestination,
+		onRestored: safetyState => {
+			console.warn(restoredSafetyStartupMessage(safetyState));
+			if (process.env.RESTORED_SAFETY_ALERT_URL && !alertDestination) {
+				console.error("[SAFETY] Restored-protection alert destination is invalid; startup will continue.");
+			}
+		},
+	});
 	await loadPersistedBans();
-	io.use(floodGuard);
+	await loadModerationSanctions();
 	io.on('connection', function (socket) {
 		let q = 0;
 
@@ -393,6 +460,8 @@ class Room {
 			speed: 1,
 			gen: 0
 		};
+        this.spotifyState = { track: "" };
+        this.backgroundImage = "";
 		this.youtubeGen = 0;
 		this.bonziTvIdentTurn = false;
 		this.byoutubeLocked = false;
@@ -450,14 +519,13 @@ function newRoom(rid) {
 }
 
 let poolId = 1;
-let whitelist = ["bonziworld.kr", "file.garden", "imgur.com", "imgflip.com", "uguu.se", "imagebam.com", "pixhost.cc", "ibb.co", "directupload.eu", "tenor.com", "upload.bonziworld.kr", "klipy.com"];
+let whitelist = ["bonziworld.kr", "file.garden", "imgur.com", "imgflip.com", "uguu.se", "imagebam.com", "pixhost.cc", "ibb.co", "directupload.eu", "tenor.com", "upload.bonziworld.kr", "klipy.com", "09f75907-fa2a-4b05-b4c2-47c05bc57fb0-00-f9uz13geq167.kira.replit.dev", "bonziupload.pxxlspace.cv"];
 // Exact host or a real subdomain of a whitelisted domain. Plain endsWith() is
 // unsafe: "evilcatbox.moe" ends with "catbox.moe".
 function hostAllowed(host) {
 	host = String(host).toLowerCase();
 	return whitelist.some((d) => host === d || host.endsWith("." + d));
 }
-
 
 
 function notifyJanitors(item) {
@@ -496,6 +564,10 @@ function staffTargetWarning(actor, target, commandName) {
 		"kick",
 		"nuke",
 		"tempban",
+		"moderate",
+		"mute",
+		"shadowban",
+		"unshadowban",
 		"bless",
 		"debless",
 		"promote",
@@ -505,14 +577,35 @@ function staffTargetWarning(actor, target, commandName) {
 		"demotehighking",
 		"demotepope",
 		"nofuckoff",
-		"grounduser",
 		"jannify",
 		"dejannify",
+		"fullydemote",
+"massdemote",
+"massban",
+		"promotecont",
+		"demotecont",
+		"promotedev",
+		"demotedev",
+		"promoteowner",
+		"demoteowner",
+		"promoteradical",
+		"demoteradical",
+		"forcemessage",
+		"volumeedit",
+		"statlock",
+		"hardban",
 		"adddj",
 		"removedj",
+		"jumpscare",
+		"redirect",
 		"shush",
 		"troll",
-		"bombify"
+"bombify",
+"beggarify"
+		,"makebrainrotted"
+		,"kirovify"
+,"tkobify"
+,"hackerify"
 	]);
 	if (!moderationCommands.has(commandName)) return null;
 
@@ -549,6 +642,8 @@ function applyRankIcons(user) {
 	const lvl = user.runlevel;
 	const flags = getPublicRankFlags(lvl);
 	user.public.runlevel = flags.runlevel;
+user.public.bigowner = flags.bigowner;
+	user.public.owner = flags.owner;
 	user.public.radical = flags.radical;
 	user.public.contributor = flags.contributor;
 	user.public.developer = flags.developer;
@@ -559,6 +654,105 @@ function applyRankIcons(user) {
 	user.public.angel = flags.angel;
 	user.public.dj = flags.dj;
 }
+
+function recordRankAction(actor, action, text, target = null, details = "") {
+	actor.room.emit("ranklog", { text });
+	void db.logAuditEvent({
+		action,
+		actorName: actor.public.name,
+		actorGuid: actor.guid,
+		targetName: target?.public?.name || "",
+		details,
+	}).catch((error) => console.error("audit:", error?.message || error));
+}
+
+function recordGlobalAction(actor, action, text, details = "") {
+	for (const room of rooms.values()) {
+		room.emit("ranklog", { text });
+	}
+	void db.logAuditEvent({
+		action,
+		actorName: actor.public.name,
+		actorGuid: actor.guid,
+		details,
+	}).catch((error) => console.error("audit:", error?.message || error));
+}
+
+function parseControlToggle(input, current) {
+	const value = String(input || "toggle").trim().toLowerCase();
+	if (value === "toggle") return !current;
+	if (["on", "true", "1"].includes(value)) return true;
+	if (["off", "false", "0"].includes(value)) return false;
+	return null;
+}
+
+function escapeHtml(value) {
+	return String(value ?? "")
+		.replaceAll("&", "&amp;")
+		.replaceAll("<", "&lt;")
+		.replaceAll(">", "&gt;")
+		.replaceAll('"', "&quot;")
+		.replaceAll("'", "&#039;");
+}
+
+const rankPersistenceByCookie = new Map();
+
+function persistGodwordForCookie(cookie, word) {
+	const key = db.normalizeCookieKey(cookie);
+	const previous = rankPersistenceByCookie.get(key) || Promise.resolve();
+	const next = previous
+		.catch(() => {})
+		.then(() => word ? db.setGodword(key, word) : db.deleteGodword(key));
+	rankPersistenceByCookie.set(key, next);
+	void next.finally(() => {
+		if (rankPersistenceByCookie.get(key) === next) {
+			rankPersistenceByCookie.delete(key);
+		}
+	}).catch(() => {});
+	return next;
+}
+
+function persistRankWord(user, word) {
+	return persistGodwordForCookie(user.cookie, word);
+}
+
+const cooldownCoordinationHealth = createLiveCooldownCoordinationHealth({
+	listUsers,
+	loadShared: db.loadSharedCooldownCoordinationHealth,
+	saveShared: db.saveSharedCooldownCoordinationHealth,
+	clearShared: db.clearSharedCooldownCoordinationHealth,
+});
+const reportCooldownStorageFailure = createCooldownStorageDiagnosticReporter({
+	recordFailure: cooldownCoordinationHealth.recordFailure,
+	report(context) {
+		console.error("[cooldown-coordination] Operational cooldown storage failed", context);
+	},
+});
+const restoredPromotionAlertCooldown =
+	await restorePermanentPromotionAlertCooldown({
+		loadCooldown: db.loadSharedPromotionAlertCooldownState,
+		reportDiagnostic: reportCooldownStorageFailure,
+		reportSuccess: cooldownCoordinationHealth.recordSuccess,
+	});
+const reportPermanentPromotionFailure = createPermanentPromotionFailureReporter({
+	initialLastAlertAt: restoredPromotionAlertCooldown?.lastAlertAt,
+	async claimCooldown(state) {
+		const claimed = await db.claimPromotionAlertCooldown(state);
+		await cooldownCoordinationHealth.recordSuccess();
+		return claimed;
+	},
+	reportCooldownDiagnostic: reportCooldownStorageFailure,
+	reportDiagnostic(context) {
+		console.error("[rank-persistence] Permanent promotion storage failed", context);
+	},
+	reportAlert(context) {
+		console.error("[OPERATOR ALERT] Repeated permanent promotion storage failures", context);
+		void sendPermanentPromotionFailureAlert({
+			...context,
+			destination: permanentPromotionAlertUrl(),
+		});
+	},
+});
 
 // Stickers: /sticker <name> shows the image in the speech bubble and makes the
 // bonzi say the matching phrase. The name is validated against this map before
@@ -590,6 +784,34 @@ let stickers = {
 	forehead: "you have a big forehead",
 	high: "i'm so high right now",
 	spook: "ew im spooky",
+bigbonzi: {
+	file: "/community-edition/img/icons/stickers/big_bonzi.png",
+	say: "BIG BONZI",
+	sound: "/community-edition/sfx/agents/boom.mp3",
+	cooldown: 5000,
+},
+lol: {
+	file: "/community-edition/img/icons/stickers/lol.png",
+	say: "lol",
+	sound: "/community-edition/sfx/agents/laugh.mp3",
+	cooldown: 5000,
+},
+no: {
+	file: "/community-edition/img/icons/stickers/no.png",
+	say: "no",
+	sound: "/community-edition/sfx/no_fuck_off.mp3",
+	cooldown: 5000,
+},
+nyan_cat: {
+	file: "/community-edition/img/icons/stickers/nyan_cat.png",
+	say: "nyan cat",
+},
+sad: {
+	file: "/community-edition/img/icons/stickers/sad.png",
+	say: "sad",
+	sound: "/sfx/revived/robby_sad.wav",
+	cooldown: 5000,
+},
 	car: { sound: "/sfx/stickers/car-crash-sfx.mp3", cooldown: 10,runlevel: 4 },
 	spaghetti: { sound: "/sfx/stickers/splat-spaghetti.mp3", cooldown: 10,runlevel: 4 },
 	run: { file: "/img/sticker/run.jpg", sound: "/sfx/stickers/run.sfx.mp3", cooldown: 10, runlevel: 4 },
@@ -597,35 +819,41 @@ let stickers = {
 
 };
 
+const bwrSounds = Object.freeze({
+	bye: "/sfx/revived/bye.mp3",
+	clap: "/sfx/revived/clap.mp3",
+	confused: "/sfx/revived/confused.ogg",
+	laugh: "/sfx/revived/laugh.ogg",
+	surprised: "/sfx/revived/surprised.wav",
+	write: "/sfx/revived/write.wav",
+});
+
 let userCommands = {
-	"godmode": function (word) {
-    const hashed = sha256(word);
-    if (hashed !== process.env.RADICALGREEN) return this.notify("Incorrect password");
-		if (godlocks.has(word)) return;
-		let level = godwordRunlevel(word);
-		if (level > 0) {
-			this.runlevel = level;
-			this.runword = word;
-			this.updateAdmin();
-			applyRankIcons(this);
-		}
-	},
-	"pgodmode": async function (word) {
-    const hashed = sha256(word);
-    if (hashed !== process.env.RADICALGREEN) return this.notify("Incorrect password");
-		if (godlocks.has(word)) return;
-		let level = godwordRunlevel(word);
-		if (level > 0) {
-			this.runlevel = level;
-			this.runword = word;
-			this.updateAdmin();
-			applyRankIcons(this);
-			await db.setGodword(this.cookie, word);
-		}
-	},
+	...createGodmodeCommandHandlers({
+		hashWord: sha256,
+		allowedHashes: [bigOwnerWord].filter(Boolean),
+		isLocked: (hashed) => godlocks.has(hashed),
+		runlevelForHash: godwordRunlevel,
+		applyRankIcons,
+		persistRankWord,
+		reportPersistenceFailure: reportPermanentPromotionFailure,
+		getSafetyState: () => ({ maintenance: maintenanceMode, emergencyLockdown }),
+	}),
+	...createSafetyActivationCommandHandlers({
+		getState: () => ({ maintenance: maintenanceMode, emergencyLockdown }),
+		setState(key, value) {
+			if (key === "maintenance") maintenanceMode = value;
+			if (key === "emergencyLockdown") emergencyLockdown = value;
+		},
+		parseToggle: parseControlToggle,
+		persistMode: db.setServerSafetyMode,
+		recordAction: recordGlobalAction,
+		listUsers,
+		destination: restoredSafetyAlertUrl(),
+	}),
 	"logout": async function () {
 		if (this.runword) {
-			await db.deleteGodword(this.cookie);
+			await persistRankWord(this, null);
 			for (const user of listUsers()) {
 				if (user.runword === this.runword) {
 					user.runlevel = 0;
@@ -677,6 +905,67 @@ let userCommands = {
 		});
 	},
 	"f": "fact",
+	"fact2": function () {
+		this.room.emit("fact2", {
+			guid: this.guid,
+			fact: fact2Facts[Math.floor(Math.random() * fact2Facts.length)],
+		});
+	},
+	"f2": "fact2",
+	"bwr": function (soundName) {
+		const sound = String(soundName || "").trim().toLowerCase();
+		if (!Object.hasOwn(bwrSounds, sound)) {
+			this.notify(`Choose a BWR sound: ${Object.keys(bwrSounds).join(", ")}`);
+			return;
+		}
+		this.room.emit("sound", {
+			guid: this.guid,
+			url: bwrSounds[sound],
+		});
+	},
+"myinstants": function (soundInput) {
+const input = String(soundInput || "").trim();
+const idPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/;
+let id = "";
+
+if (input) {
+try {
+const url = new URL(input);
+const host = url.hostname.toLowerCase();
+if (url.protocol === "https:" && (host === "myinstants.com" || host === "www.myinstants.com")) {
+const path = url.pathname.replace(/\/+$/, "");
+const mediaMatch = path.match(/^\/media\/sounds\/([^/]+)\.mp3$/i);
+const pageMatch = path.match(/^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?instant\/([^/]+)$/i);
+const slug = mediaMatch?.[1] || pageMatch?.[1] || "";
+const decodedSlug = decodeURIComponent(slug);
+if (idPattern.test(decodedSlug)) id = decodedSlug;
+}
+} catch {}
+}
+
+if (!id) {
+this.notify("Use a valid MyInstants link, for example: /myinstants https://www.myinstants.com/en/instant/airhorn/");
+			return;
+		}
+this.room.emit("soundButton", {
+			guid: this.guid,
+			url: `https://www.myinstants.com/media/sounds/${id}.mp3`,
+		});
+	},
+	"wtf": function () {
+		const quote = wtfQuotes[Math.floor(Math.random() * wtfQuotes.length)]
+			.replaceAll("{NAME}", escapeHtml(this.public.name))
+			.replaceAll("{COLOR}", escapeHtml(this.public.color));
+		const text = censor(quote);
+		this.room.emit("talk", {
+			guid: this.guid,
+			text,
+		});
+		this.room.emit("wtf", {
+			guid: this.guid,
+			text,
+		});
+	},
 	"gokid": function () {
 		this.room.emit("gokid", {
 			guid: this.guid,
@@ -728,6 +1017,71 @@ let userCommands = {
 			vid: vid,
 			msgid: messageId,
 		});
+	},
+	"spotify": function (args, messageId) {
+		let track = String(args || "").trim();
+		let match = track.match(/open\.spotify\.com\/(?:intl-[a-z]+\/)?track\/([A-Za-z0-9]{22})/i);
+		if (match) track = match[1];
+		track = track.replace(/[^A-Za-z0-9]/g, "");
+		if (track.length !== 22) {
+			this.notify("Please provide a valid Spotify track ID or track URL.");
+			return;
+		}
+		this.room.emit("spotify", {
+			guid: this.guid,
+			track,
+			msgid: messageId,
+		});
+	},
+	"bspotify": function (args) {
+		let track = String(args || "").trim();
+		if (track.toLowerCase() === "none") track = "";
+		if (track) {
+			let match = track.match(/open\.spotify\.com\/(?:intl-[a-z]+\/)?track\/([A-Za-z0-9]{22})/i);
+			if (match) track = match[1];
+			track = track.replace(/[^A-Za-z0-9]/g, "");
+			if (track.length !== 22) {
+				this.notify("Please provide a valid Spotify track ID, track URL, or none.");
+				return;
+			}
+		}
+		this.room.spotifyState = { track };
+		this.room.emit("bspotify", this.room.spotifyState);
+		this.room.emit("ranklog", {
+			text: track
+				? `${this.public.name} set the background Spotify track.`
+				: `${this.public.name} cleared background Spotify.`,
+		});
+	},
+	"bimage": async function (args) {
+		let image = String(args || "").trim();
+		if (image.toLowerCase() === "none") {
+			this.room.backgroundImage = "";
+			this.room.emit("bimage", { url: "" });
+			this.room.emit("ranklog", { text: `${this.public.name} cleared the room background image.` });
+			return;
+		}
+		let url;
+		try { url = new URL(image); } catch {
+			this.notify("Please provide a valid image URL or none.");
+			return;
+		}
+		if (!hostAllowed(url.host)) {
+			this.notify("This image provider is not whitelisted.");
+			return;
+		}
+		if (decodeURIComponent(url.href).toLowerCase().includes("svg")) {
+			this.notify("SVG backgrounds are not allowed.");
+			return;
+		}
+		let reason = await db.getImageBlockReason(url.href);
+		if (reason) {
+			this.notify(`This image has been blacklisted: ${reason}`);
+			return;
+		}
+		this.room.backgroundImage = url.href;
+		this.room.emit("bimage", { url: this.room.backgroundImage });
+		this.room.emit("ranklog", { text: `${this.public.name} changed the room background image.` });
 	},
         "byoutube": function (args) {
 		if (this.runLevel === 2) return;
@@ -881,6 +1235,13 @@ let userCommands = {
 	},
 	"color": function (color) {
                 if (this.public.statlocked) return;
+const requestedColor = String(color || "").trim().toLowerCase();
+if (requestedColor === "greenjimmy") {
+return userCommands.greenjimmy.call(this);
+}
+if (requestedColor === "bluejimmy") {
+return userCommands.bluejimmy.call(this);
+}
 		let cols = this.public.color.split(" ");
 		if (color) {
 			if (settings.bonziColors.indexOf(color) === -1)
@@ -891,6 +1252,35 @@ let userCommands = {
 			cols[0] = bc[Math.floor(Math.random() * bc.length)];
 		}
 		this.public.color = cols.join(" ");
+		this.room.updateUser(this);
+	},
+"sticky": function () {
+if (this.public.statlocked) return;
+this.public.color = "stick";
+this.public.tag = "The BELOVED Stickman himself";
+this.room.updateUser(this);
+},
+ "jimmy": function () {
+ if (this.public.statlocked) return;
+ this.public.color = "jimmy";
+ this.public.tag = "Admin";
+ this.room.updateUser(this);
+ },
+ "greenjimmy": function () {
+ if (this.public.statlocked) return;
+ if (this.runlevel < 7.5) return;
+ this.public.color = "greenjimmy";
+ this.room.updateUser(this);
+ },
+ "bluejimmy": function () {
+ if (this.public.statlocked) return;
+ if (this.runlevel < 8) return;
+ this.public.color = "bluejimmy";
+ this.room.updateUser(this);
+ },
+	"brainrotted": function () {
+		if (this.public.statlocked) return;
+		this.public.color = "brainrotted";
 		this.room.updateUser(this);
 	},
 	"colour": "color",
@@ -910,7 +1300,7 @@ let userCommands = {
 
     "greenpope": function () {
     this.public.color = "greenpope";
-    this.public.tag = "Owner";
+    this.public.tag = "";
     this.room.updateUser(this);
 },
 
@@ -1009,6 +1399,8 @@ let userCommands = {
 			if (dest.youtubeState.vid || dest.youtubeState.list || dest.youtubeState.video) {
 				u.socket.emit("byoutube", { ...dest.youtubeState, now: Date.now() });
 			}
+u.socket.emit("bspotify", dest.spotifyState);
+u.socket.emit("bimage", { url: dest.backgroundImage });
 		}
 		this.notify(`Banished ${movers.length} user${movers.length !== 1 ? "s" : ""} to ${dest.id}.`);
 	},
@@ -1195,14 +1587,18 @@ let userCommands = {
     if (!user) return;
     let warning = staffTargetWarning(this, user, "jannify");
     if (warning) return this.notify(warning);
-    if (user.runlevel >= 1.05) return;
+    if (user.runlevel !== 0 && user.runlevel !== 1) {
+        return this.notify("Only regular or Blessed users can become Janitors.");
+    }
     user.runlevel = 1.05;
+    user.runword = janitors;
     user.public.tag = "Janitor";
     applyRankIcons(user); // set broom + runlevel now, not just on reconnect
     user.room.updateUser(user);
-    await db.setGodword(user.cookie, janitors);
+    await persistRankWord(user, janitors);
     user.socket.emit("janitor");
     user.socket.emit("janitor_first");   // <-- first-time only
+    recordRankAction(this, "jannify", `${this.public.name} jannifies ${user.public.name}.`, user);
 },
 	"adddj": async function(id) {
     let user = findUser(id);
@@ -1210,10 +1606,11 @@ let userCommands = {
     let warning = staffTargetWarning(this, user, "adddj");
     if (warning) return this.notify(warning);
     user.runlevel = 1.75;
+    user.runword = djs;
     user.public.tag = "DJ";
 	 applyRankIcons(user);
     user.room.updateUser(user);
-    await db.setGodword(user.cookie, djs);
+    await persistRankWord(user, djs);
     user.socket.emit("dj");
     user.socket.emit("dj_first");   // <-- first-time only
 },
@@ -1222,12 +1619,13 @@ let userCommands = {
     if (!user) return;
     let warning = staffTargetWarning(this, user, "removedj");
     if (warning) return this.notify(warning);
-    if (user.runlevel !== 4.03) return;
+    if (user.runlevel !== 1.75) return;
     user.runlevel = user.room.id === "default" ? 0 : 1;
     user.public.tag = "";
 	 applyRankIcons(user);
     user.room.updateUser(user);
-    await db.deleteGodword(user.cookie);  // remove from DB
+    user.runword = null;
+    await persistRankWord(user, null);
     user.socket.emit("xss", { guid: user.guid, text: `Your DJ status has been removed.<br><small>Only you can see this.</small>` });
 },
 "dejannify": async function(id) {
@@ -1240,8 +1638,10 @@ let userCommands = {
     user.public.tag = "";
     applyRankIcons(user); // clear the broom + update runlevel right away
     user.room.updateUser(user);
-    await db.deleteGodword(user.cookie);  // remove from DB
+    user.runword = null;
+    await persistRankWord(user, null);
     user.socket.emit("xss", { guid: user.guid, text: `Your Janitor status has been removed.<br><small>Only you can see this.</small>` });
+    recordRankAction(this, "dejannify", `${this.public.name} dejannifies ${user.public.name}.`, user);
 },
 	"japprove": async function(id) {
     let item = pendingMedia.get(id);
@@ -1290,11 +1690,11 @@ let userCommands = {
 		if (user.runlevel === 7) return this.socket.emit("forcetalk", { guid: this.guid, text: "HEY GUYS LOOK AT ME I TRIED TO BAN THE OWNER OF THIS SITE LMAO" });
 		let warning = staffTargetWarning(this, user, "ban");
 		if (warning) return this.notify(warning);
-		let ip = normalizeIp(user.getIp());
-		bans.add(ip);
+let ip = normalizeIp(user.getNetworkIp());
+		bans.set(ip, reason);
 		await db.saveBan(ip, reason);
 		for (const target of listUsers()) {
-			if (normalizeIp(target.getIp()) === ip) {
+if (normalizeIp(target.getNetworkIp()) === ip) {
 				target.socket.emit("ban", { reason });
 				target.disconnect();
 			}
@@ -1313,58 +1713,77 @@ let userCommands = {
 		await db.removeBan(ip);
 		this.notify(`Unbanned ${ip}.`);
 	},
-	"asnban": async function (text) {
-		let [target, ...reasonArr] = text.split(" ");
-		if (!target) return this.notify("Please specify a user ID or ASN.");
+	"hardban": async function (text) {
+		let [id, ...reasonParts] = String(text || "").trim().split(/\s+/);
+		if (!id) return this.notify("Please specify a user ID.");
+		let user = findUser(id);
+		if (!user) return this.notify("That user is not here.");
+		if (user === this) return this.notify("You cannot hardban yourself.");
+		let warning = staffTargetWarning(this, user, "hardban");
+		if (warning) return this.notify(warning);
 
-		let reason = reasonArr.join(" ") || "ASN Ban";
-		let asn = null;
-		let targetName = null;
+		const ip = normalizeIp(user.getNetworkIp());
+		const fingerprint = hardbanFingerprint(user.cookie);
+		if (!ip || !fingerprint) return this.notify("Could not identify that user's connection.");
+		const reason = reasonParts.join(" ") || "Hard ban";
 
-		let user = findUser(target);
-
-		if (user) {
-			if (user.runlevel === 7) {
-				return this.socket.emit("forcetalk", { guid: this.guid, text: "HEY GUYS LOOK AT ME I TRIED TO BAN THE OWNER OF THIS SITE LMAO" });
-			}
-			let warning = staffTargetWarning(this, user, "asnban");
-			if (warning) return this.notify(warning);
-
-			let ip = normalizeIp(user.getIp());
-			asn = await getAsn(ip);
-			if (!asn) return this.notify("Could not resolve ASN for this user.");
-			targetName = user.public.name;
-		} else {
-			asn = target.toUpperCase();
-			if (!asn.startsWith("AS")) {
-				asn = "AS" + asn;
-			}
-			targetName = asn;
-		}
-
-		await addAsnBan(asn, reason);
-
+		await db.saveHardBan(ip, fingerprint, reason);
 		for (const targetUser of listUsers()) {
-			let targetIp = normalizeIp(targetUser.getIp());
-			let targetAsn = await getAsn(targetIp);
-			if (targetAsn === asn) {
+			const sameIp = normalizeIp(targetUser.getNetworkIp()) === ip;
+			const sameFingerprint = hardbanFingerprint(targetUser.cookie) === fingerprint;
+			if (sameIp || sameFingerprint) {
 				targetUser.socket.emit("ban", { reason });
 				targetUser.disconnect();
 			}
 		}
-
-		this.room.emit("ranklog", { text: `${this.public.name} ASN bans ${targetName}.` });
+		this.room.emit("ranklog", { text: `${this.public.name} hardbans ${user.public.name}.` });
 	},
-	"unasnban": async function (asn) {
-		asn = (asn || "").trim();
-		if (!asn) return this.notify("Please specify an ASN to unban.");
-		let formattedAsn = asn.toUpperCase();
-		if (!formattedAsn.startsWith("AS")) {
-			formattedAsn = "AS" + formattedAsn;
+	"unhardban": async function (target) {
+		target = String(target || "").trim();
+		if (!target) return this.notify("Please specify a user ID, IP address, or fingerprint.");
+
+		const user = findUser(target);
+		const ip = user ? normalizeIp(user.getNetworkIp()) : normalizeIp(target);
+		const fingerprint = user
+			? hardbanFingerprint(user.cookie)
+			: (/^[a-f0-9]{64}$/i.test(target) ? target.toLowerCase() : "");
+		const removed = await db.removeHardBan(ip, fingerprint);
+		if (!removed) return this.notify("No matching hardban was found.");
+		this.notify(`Removed ${removed} matching hardban${removed === 1 ? "" : "s"}.`);
+	},
+	"hardbanlist": async function (arg) {
+		const hardBans = await db.getHardBans();
+		if (hardBans.length === 0) return this.notify("No hardbans.");
+
+		const bansPerPage = 10;
+		const totalPages = Math.ceil(hardBans.length / bansPerPage);
+		const page = Math.max(1, Math.min(Number.parseInt(arg, 10) || 1, totalPages));
+		const startIndex = (page - 1) * bansPerPage;
+		const rows = hardBans.slice(startIndex, startIndex + bansPerPage);
+		const entries = rows.map((ban, index) => {
+			const created = ban.created_at
+				? ` | added ${new Date(ban.created_at).toLocaleString()}`
+				: "";
+			return `${startIndex + index + 1}. ${ban.ip} | ${ban.fingerprint} | ${ban.reason}${created}\n/unhardban ${ban.ip}`;
+		});
+
+		let message = `Hardbans [Page ${page}/${totalPages}]:\n${entries.join("\n\n")}`;
+		if (page < totalPages) message += `\n\nUse /hardbanlist ${page + 1} for next page`;
+		if (page > 1) message += `\n\nUse /hardbanlist ${page - 1} for previous page`;
+		this.socket.emit("banlistAlert", message);
+	},
+	"godmodetracker": function (input) {
+		if (this.runlevel !== 8) {
+			this.socket.emit("commandFail", { reason: "runlevel" });
+			return;
 		}
-		await removeAsnBan(formattedAsn);
-		this.notify(`Unbanned ASN ${formattedAsn}.`);
-		this.room.emit("ranklog", { text: `${this.public.name} ASN unbans ${formattedAsn}.` });
+
+		const report = buildGodmodeTrackerPage(listUsers(), input);
+		if (report.error) return this.notify(report.error);
+		this.socket.emit("alert", {
+			title: report.title,
+			text: report.lines.map(escapeHtml).join("<br>"),
+		});
 	},
 	"kick": function (text) {
 		let [id, ...reasonArr] = text.split(" ");
@@ -1378,29 +1797,111 @@ let userCommands = {
 		user.disconnect();
 		this.room.emit("ranklog", { text: `${this.public.name} kicks ${user.public.name}.` });
 	},
-	"getuserid": function (id) {
-		let user = findUser(id);
-		if (!user) return;
-		this.notify(`User ID: ${id}`);
+	"moderate": async function (input) {
+		const request = parseModerationRequest(input);
+		if (!request) return this.notify("Invalid moderation action or duration.");
+		const minimum = moderationMinimumRunlevel(request.action, request.duration);
+		if (this.runlevel < minimum) {
+			this.socket.emit("commandFail", { reason: "runlevel" });
+			return;
+		}
+		const user = findUser(request.target);
+		if (!user) return this.notify("That user is not here.");
+		if (user === this) return this.notify("You cannot moderate yourself.");
+		const warning = staffTargetWarning(this, user, request.action);
+		if (warning) return this.notify(warning);
+		const ip = normalizeIp(user.getNetworkIp());
+		if (!ip) return this.notify("Could not identify that user's connection.");
+		const reason = request.reason || `${request.action} by moderator`;
+
+		if (request.action === "kick") {
+			user.socket.emit("kick", { reason });
+			user.disconnect();
+			recordRankAction(this, "kick", `${this.public.name} kicks ${user.public.name}.`, user);
+			return;
+		}
+		if (request.action === "ban") {
+			const duration = BAN_DURATIONS_MS[request.duration];
+			const end = duration === null ? null : Date.now() + duration;
+			if (end === null) bans.set(ip, reason);
+			else {
+				tempBans.set(ip, { reason, end });
+				scheduleTimedBanExpiry(ip, end);
+			}
+			await db.saveBan(ip, reason, end);
+			for (const target of listUsers()) {
+				if (normalizeIp(target.getNetworkIp()) !== ip) continue;
+				target.socket.emit("ban", { reason, ...(end ? { end } : {}) });
+				target.disconnect();
+			}
+			const ids = await db.getMessageIdsFromIp(ip);
+			if (ids.length) this.room.emit("delete", { ids });
+			recordRankAction(
+				this,
+				"ban",
+				`${this.public.name} bans ${user.public.name}${end ? ` for ${request.duration}` : " permanently"}.`,
+				user,
+				`duration=${request.duration}`
+			);
+			return;
+		}
+		if (request.action === "mute") {
+			const end = Date.now() + MUTE_DURATION_MS;
+			const sanction = { reason, end };
+			mutedIps.set(ip, sanction);
+			await db.saveModerationSanction(ip, "mute", reason, end);
+			scheduleSanctionExpiry(mutedIps, ip, "mute", end);
+			for (const target of listUsers()) {
+				if (normalizeIp(target.getNetworkIp()) === ip) {
+					target.notify("You have been muted for 15 minutes.");
+				}
+			}
+			recordRankAction(this, "mute", `${this.public.name} mutes ${user.public.name} for 15 minutes.`, user);
+			return;
+		}
+		if (request.action === "shadowban") {
+			shadowbannedIps.set(ip, { reason, end: null });
+			await db.saveModerationSanction(ip, "shadowban", reason);
+			recordRankAction(this, "shadowban", `${this.public.name} shadowbans ${user.public.name}.`, user);
+			return;
+		}
+		shadowbannedIps.delete(ip);
+		await db.removeModerationSanction(ip, "shadowban");
+		recordRankAction(this, "unshadowban", `${this.public.name} removes ${user.public.name}'s shadowban.`, user);
+	},
+	"mute": async function (text) {
+		const [id, ...reason] = String(text || "").trim().split(/\s+/);
+		return userCommands.moderate.call(this, `mute 15m ${id} ${reason.join(" ")}`);
+	},
+	"shadowban": async function (text) {
+		const [id, ...reason] = String(text || "").trim().split(/\s+/);
+		return userCommands.moderate.call(this, `shadowban none ${id} ${reason.join(" ")}`);
+	},
+	"unshadowban": async function (text) {
+		const [id] = String(text || "").trim().split(/\s+/);
+		return userCommands.moderate.call(this, `unshadowban none ${id}`);
 	},
 	"info": function (id) {
 		let user = findUser(id);
 		if (!user) return;
-		this.notify(user.getIp());
+this.notify(user.getIp());
 	},
 	"hat": async function (input) {
                 if (this.public.statlocked) return;
 		let hatList = input.split(" ");
 		hatList[0] ||= settings.hats[Math.floor(Math.random() * settings.hats.length)];
-		let limit = 1;
+		let limit = 3;
 		let hats = settings.hats;
 		if (this.runlevel >= 1) {
 			limit = 3;
 			hats = [...hats, ...settings.blessedHats];
-			if (this.runlevel >= 2) { 
-				hats = [...hats, "king", "headphones2", "dank2", "headphones3", "scarf2", "redcrown", "diamondchain", "silverchain", "bluepupils", "redpupils", "greenpupils"];
+if (this.runlevel >= 2) {
+hats = [...hats, "king", "headphones2", "dank2", "headphones3", "scarf2", "redcrown", "diamondchain", "silverchain", "bluepupils", "redpupils", "greenpupils", "greendiamondchain", "yellowdiamondchain", "purplediamondchain", "scarf3", "scarf4", "scarf5", "yellowpupils", "purplepupils", "bluecrown", "greencrown", "yellowcrown", "purplecrown", "headphones4", "gamer", "premium", "opalchain"];
 				limit = 10;
 			}
+if (this.runlevel >= 4) {
+hats = [...hats, "king2", "hiimstickman", "palestine"];
+}
 		}
 		if (hatList[0].toLowerCase() === "none") {
 			this.public.color = this.public.color.split(" ")[0];
@@ -1459,94 +1960,6 @@ let userCommands = {
 		});
 
 		this.notify(`Kicked ${targets.length} user${targets.length !== 1 ? "s" : ""}.`);
-	},
-	"massban": function (text) {
-		let [type, ...argsArr] = text.split(" ");
-		let args = argsArr.join(" ");
-		let reason = "Botnet";
-		let targets = [];
-
-		if (type === "all") {
-			reason = args || reason;
-			targets = this.room.users.filter(u => u.guid !== this.guid && u.runlevel < 6);
-			this.room.emit("ranklog", { text: `${this.public.name} kicked Everyone.` });
-		} else if (type === "name") {
-			let [name, ...rArr] = args.split(" ");
-			reason = rArr.join(" ") || reason;
-			targets = this.room.users.filter(u => u.guid !== this.guid && u.runlevel < 2 && u.public.name === name);
-		} else if (type === "regex") {
-			let [regexStr, ...rArr] = args.split(" ");
-			reason = rArr.join(" ") || reason;
-			if (regexStr.length > 100) return this.notify("Regex too long.");
-			try {
-				let regex = new RegExp(regexStr, "i");
-				targets = this.room.users.filter(u => u.guid !== this.guid && u.runlevel < 2 && regex.test(u.public.name));
-									this.room.emit("ranklog", { text: `${this.public.name} masskicked a regex.` });
-			} catch (e) {
-				return this.notify("Invalid regex.");
-			}
-		} else {
-			return;
-		}
-
-		targets.forEach(u => {
-		const reason = "Botnet";
-		const ip = normalizeIp(u.getIp());
-		bans.add(ip);
-		db.saveBan(ip, reason);
-		for (const target of listUsers()) {
-			if (normalizeIp(target.getIp()) === ip) {
-				target.socket.emit("ban", { reason });
-				target.disconnect();
-			}
-		}
-		const ids = db.getMessageIdsFromIp(ip);
-		if (ids.length) {
-			this.room.emit("delete", { ids });
-		}
-		});
-
-		this.notify(`Banned ${targets.length} user${targets.length !== 1 ? "s" : ""}.`);
-	},
-	"massground": function (text) {
-		let [type, ...argsArr] = text.split(" ");
-		let args = argsArr.join(" ");
-		let reason = "EXISTING";
-		let targets = [];
-
-		if (type === "all") {
-			reason = args || reason;
-			targets = this.room.users.filter(u => u.guid !== this.guid && u.runlevel < 7);
-			this.room.emit("ranklog", { text: `${this.public.name} grounded Everyone.` });
-		} else if (type === "name") {
-			let [name, ...rArr] = args.split(" ");
-			reason = rArr.join(" ") || reason;
-			targets = this.room.users.filter(u => u.guid !== this.guid && u.runlevel < 7 && u.public.name === name);
-		} else if (type === "regex") {
-			let [regexStr, ...rArr] = args.split(" ");
-			reason = rArr.join(" ") || reason;
-			if (regexStr.length > 100) return this.notify("Regex too long.");
-			try {
-				let regex = new RegExp(regexStr, "i");
-				targets = this.room.users.filter(u => u.guid !== this.guid && u.runlevel < 2 && regex.test(u.public.name));
-									this.room.emit("ranklog", { text: `${this.public.name} grounded a regex.` });
-			} catch (e) {
-				return this.notify("Invalid regex.");
-			}
-		} else {
-			return;
-		}
-
-		targets.forEach(u => {
-				setTimeout(function () {
-					u.socket.emit("ground", {
-						reason: "EXISTING<br><br><audio style='display: none;' src=\"/sfx/grounded.mp3\" autoplay>",
-					});
-					u.disconnect();
-				}, 380);
-		});
-
-		this.notify(`Grounded ${targets.length} user${targets.length !== 1 ? "s" : ""}.`);
 	},
 	"masstroll": function (text) {
 		let [type, ...argsArr] = text.split(" ");
@@ -1636,16 +2049,132 @@ let userCommands = {
 		}
 	},
 	"restart": async function () {
-		try {
-			this.notify("Restarting the server...");
-			await setCloudflareSecurityLevel("under_attack");
-			spawnRestartChild();
-			setTimeout(() => {
-				process.exit(0);
-			}, 1000);
-		} catch (e) {
-			this.notify(String(e));
+		this.notify("Restarting the server without changing Cloudflare...");
+		recordGlobalAction(this, "restart", `${this.public.name} restarts the server.`);
+		spawnRestartChild();
+		setTimeout(() => process.exit(0), 1000);
+	},
+	"serverstatus": createServerStatusCommandHandler({
+		getDatabaseStats: db.getDatabaseStatsWithinDeadline,
+		getCooldownHealth: () => cooldownCoordinationHealth.getSharedStatus(),
+		listUsers,
+		getRoomCount: () => rooms.size,
+		getSafetyState: () => ({
+			maintenance: maintenanceMode,
+			emergencyLockdown,
+		}),
+		escapeHtml,
+	}),
+	"auditcenter": async function (input) {
+		const limit = Math.max(1, Math.min(50, Number(input) || 25));
+		const events = await db.getAuditEventsWithinDeadline(limit);
+		if (!events) {
+			this.socket.emit("alert", {
+				title: "Audit center",
+				text: "Audit history is currently unavailable.",
+			});
+			return;
 		}
+		const lines = events.map(event => {
+			const target = event.target_name ? ` → ${event.target_name}` : "";
+			const detail = event.details ? ` (${event.details})` : "";
+			return `[${event.created_at}] ${event.actor_name}: ${event.action}${target}${detail}`;
+		});
+		this.socket.emit("alert", {
+			title: `Audit center — latest ${events.length}`,
+			text: lines.length ? lines.map(escapeHtml).join("<br>") : "No audit events yet.",
+			audit: {
+				events,
+				total: events.length,
+			},
+		});
+	},
+	"managewordfilters": function (input) {
+		if (this.runlevel !== 8) {
+			this.socket.emit("commandFail", { reason: "runlevel" });
+			return;
+		}
+
+		try {
+			const request = String(input || "").trim()
+				? JSON.parse(input)
+				: { operation: "list", category: "messages" };
+			if (!request || typeof request !== "object" || Array.isArray(request)) {
+				throw new Error("Invalid word-filter request.");
+			}
+
+			if (!request.operation || request.operation === "list") {
+				this.socket.emit("alert", {
+					title: "Word filter manager",
+					wordFilters: wordFilterManagerData(request.category || "messages"),
+				});
+				return;
+			}
+
+			const result = wordFilterStore.mutate(request);
+			const compiled = wordFilterStore.getCompiled();
+			filters = compiled.messages;
+			filterse = compiled.usernames;
+			filtersa = compiled.godword;
+
+			void db.logAuditEvent({
+				action: `word_filter_${result.operation}`,
+				actorName: this.public.name,
+				actorGuid: this.guid,
+				details: `category=${result.category}; pattern_length=${result.pattern.length}`,
+			}).catch((error) => console.error("audit:", error?.message || error));
+
+			const verb = result.operation === "add"
+				? "Added"
+				: result.operation === "update"
+					? "Updated"
+					: "Removed";
+			this.socket.emit("alert", {
+				title: "Word filter manager",
+				wordFilters: wordFilterManagerData(
+					result.category,
+					`${verb} filter in ${WORD_FILTER_CATEGORIES.find(({ id }) => id === result.category).label}.`,
+				),
+			});
+		} catch (error) {
+			this.socket.emit("alert", {
+				title: "Word filter manager",
+				text: error?.message || "Could not apply that word-filter change.",
+			});
+		}
+	},
+	"databasesnapshot": async function () {
+		try {
+			const snapshotPath = await db.createDatabaseSnapshotWithinDeadline();
+			recordGlobalAction(this, "database_snapshot", `${this.public.name} creates a database snapshot.`, path.basename(snapshotPath));
+			this.notify(`Database snapshot created: ${path.basename(snapshotPath)}`);
+		} catch {
+			this.notify("Database snapshot failed. Please try again later.");
+		}
+	},
+	"resetdatabase": async function (input) {
+		const supplied = String(input || "").trim();
+		const confirmation = resetConfirmations.requestOrConfirm(this.cookie, supplied);
+		if (confirmation.status === "issued") {
+			return this.notify(`Danger: this deletes all application data. A snapshot will be created first. To confirm within 60 seconds, run /resetdatabase ${confirmation.token}`);
+		}
+		if (confirmation.status !== "confirmed") {
+			return this.notify(`Database reset rejected: confirmation token ${confirmation.status}. Run /resetdatabase with no token to start again.`);
+		}
+		const snapshotPath = await db.snapshotAndResetApplicationData();
+		bans.clear();
+		tempBans.clear();
+		godlocks.clear();
+		pendingMedia.clear();
+		await db.logAuditEvent({
+			action: "database_reset",
+			actorName: this.public.name,
+			actorGuid: this.guid,
+			details: `backup=${path.basename(snapshotPath)}`,
+		});
+		this.notify(`Database reset complete. Backup: ${path.basename(snapshotPath)}. Restarting...`);
+		spawnRestartChild();
+		setTimeout(() => process.exit(0), 1200);
 	},
 	"h": "hat",
 
@@ -1664,6 +2193,23 @@ let userCommands = {
 		user.socket.emit("debless");
 		this.notify(`Deblessed ${user.public.name}.`);
 		this.room.emit("ranklog", { text: `${this.public.name} deblesses ${user.public.name}.` });
+	},
+	"captcha": async function(data) {
+		try {
+			if (data !== "on" && data !== "off") return this.notify("usage: /captcha [on|off]");
+			let on = data === "on";
+			await fetch(`https://api.cloudflare.com/client/v4/zones/${process.env.CLOUDFLARE_ZONE}/settings/security_level`, {
+				method: "PATCH",
+				headers: {
+					"Authorization": `Bearer ${process.env.CLOUDFLARE_KEY}`,
+					"Content-Type": "application/json"
+				},
+				body: JSON.stringify({ value: on ? "under_attack" : "medium" }),
+			});
+			this.notify(`Captcha is now ${on ? "on" : "off"}.`);
+		} catch(e) {
+			this.notify(String(e));
+		}
 	},
 	"bless": function (id) {
 		let user = findUser(id);
@@ -1689,7 +2235,7 @@ let userCommands = {
 
 		user.runlevel = 2;
 		user.runword = lowerKings;
-		await db.setGodword(user.cookie, lowerKings);
+await persistRankWord(user, lowerKings);
 		applyRankIcons(user);
 		user.room.updateUser(user);
 		user.updateAdmin();
@@ -1708,7 +2254,7 @@ let userCommands = {
 		if (user.runlevel < 2) return this.notify("That user is not a Low King.");
 
 		if (user.runword === lowerKings) {
-			await db.deleteGodword(user.cookie);
+await persistRankWord(user, null);
 			user.runword = null;
 		}
 		user.runlevel = 0;
@@ -1716,6 +2262,7 @@ let userCommands = {
 		user.room.updateUser(user);
 		user.updateAdmin();
 		user.public.tag = "";
+		user.public.color = "purple";
 		user.notify(`You were demoted by ${this.public.name}.`);
 		this.notify(`Demoted ${user.public.name}.`);
 		this.room.emit("ranklog", { text: `${this.public.name} demotes ${user.public.name}.` });
@@ -1724,7 +2271,7 @@ let userCommands = {
 		let user = findUser(id);
 		if (!user) return this.notify("That user is not here.");
 		if (user) {
-			await db.deleteGodword(user.cookie);
+await persistRankWord(user, null);
 			user.runword = null;
 		}
 		user.runlevel = 0;
@@ -1732,9 +2279,116 @@ let userCommands = {
 		user.room.updateUser(user);
 		user.updateAdmin();
 		user.public.tag = "";
-		user.notify(`You were demoted.`);
+		user.socket.emit("xss", { guid: this.guid, text: `You were demoted by ${this.public.name}.<br><small>Only you can see this.</small>` });
 		this.notify(`Demoted ${user.public.name}.`);
+		this.room.emit("ranklog", { text: `${this.public.name} demotes ${user.public.name}.` });
 	},
+"massdemote": async function (input) {
+const request = parseMassDemoteRequest(input);
+if (request.error) return this.notify(request.error);
+
+const targets = selectMassDemoteTargets(listUsers(), this, request);
+if (targets.length === 0) return this.notify("No demotable users matched that selector.");
+
+const selectorKey = request.selector === "all" ? "all" : `regex:${request.pattern}`;
+const targetFingerprint = sha256(targets.map((user) => user.guid).sort().join("\0"));
+const confirmation = massDemoteConfirmations.requestOrConfirm(
+`${this.cookie}:${selectorKey}:${targetFingerprint}`,
+request.token
+);
+if (confirmation.status === "issued") {
+const selector = request.selector === "all" ? "all" : `regex ${request.pattern}`;
+return this.notify(`Mass demote matched ${targets.length} user(s). To confirm within 60 seconds, run /massdemote ${selector} --confirm ${confirmation.token}`);
+}
+if (confirmation.status !== "confirmed") {
+return this.notify("Mass demote rejected: confirmation token is incorrect or expired. Run the command without --confirm to start again.");
+}
+
+let demoted = 0;
+let failed = 0;
+for (const user of targets) {
+try {
+await persistRankWord(user, null);
+} catch (error) {
+failed++;
+console.error("massdemote persistence:", error?.message || error);
+continue;
+}
+user.runword = null;
+user.runlevel = 0;
+user.public.tag = "";
+user.public.color = "purple";
+applyRankIcons(user);
+user.room.updateUser(user);
+user.updateAdmin();
+user.notify(`You were fully demoted by ${this.public.name}.`);
+demoted++;
+}
+
+const summary = `${this.public.name} mass-demotes ${demoted} user(s)${failed ? `; ${failed} persistence failure(s)` : ""}.`;
+recordGlobalAction(this, "massdemote", summary, `selector=${selectorKey};matched=${targets.length};demoted=${demoted};failed=${failed}`);
+this.notify(`Mass demote complete: ${demoted} demoted${failed ? `, ${failed} unchanged because persistence failed` : ""}.`);
+},
+"massban": async function (input) {
+	const request = parseMassBanRequest(input);
+	if (request.error) return this.notify(request.error);
+
+	const targets = selectMassBanTargets(listUsers(), this, request);
+	if (targets.length === 0) return this.notify("No eligible users matched that selector.");
+
+	const selectorKey = request.selector === "all" ? "all" : `regex:${request.pattern}`;
+	const targetFingerprint = sha256(targets.map((user) => user.guid).sort().join("\0"));
+	const confirmation = massBanConfirmations.requestOrConfirm(
+		`${this.cookie}:${selectorKey}:${targetFingerprint}`,
+		request.token
+	);
+	if (confirmation.status === "issued") {
+		const selector = request.selector === "all" ? "all" : `regex ${request.pattern}`;
+		return this.notify(`Mass ban matched ${targets.length} user(s). To confirm within 60 seconds, run /massban ${selector} --confirm ${confirmation.token}`);
+	}
+	if (confirmation.status !== "confirmed") {
+		return this.notify("Mass ban rejected: confirmation token is incorrect or expired. Run the command without --confirm to start again.");
+	}
+
+	const actorIp = normalizeIp(this.getNetworkIp());
+	const targetsByIp = new Map();
+	for (const user of targets) {
+		const ip = normalizeIp(user.getNetworkIp());
+		if (!ip || ip === actorIp) continue;
+		if (!targetsByIp.has(ip)) targetsByIp.set(ip, []);
+		targetsByIp.get(ip).push(user);
+	}
+
+	const reason = `Mass ban by ${this.public.name}`;
+	let banned = 0;
+	let failed = 0;
+	for (const [ip, ipTargets] of targetsByIp) {
+		try {
+			await db.saveBan(ip, reason);
+			bans.set(ip, reason);
+			const affectedRooms = new Set();
+			for (const target of listUsers()) {
+				if (normalizeIp(target.getNetworkIp()) !== ip) continue;
+				affectedRooms.add(target.room);
+				target.socket.emit("ban", { reason });
+				target.disconnect();
+			}
+			const ids = await db.getMessageIdsFromIp(ip);
+			if (ids.length) {
+				for (const room of affectedRooms) room.emit("delete", { ids });
+			}
+			banned += ipTargets.length;
+		} catch (error) {
+			failed++;
+			console.error("massban persistence:", error?.message || error);
+		}
+	}
+
+	const skipped = targets.length - banned;
+	const summary = `${this.public.name} mass-bans ${banned} user(s) permanently.`;
+	recordGlobalAction(this, "massban", summary, `selector=${selectorKey};matched=${targets.length};banned=${banned};failed=${failed};skipped=${skipped}`);
+	this.notify(`Mass ban complete: ${banned} user${banned === 1 ? "" : "s"} permanently banned${failed ? `, ${failed} failed to save` : ""}${skipped && !failed ? `, ${skipped} skipped` : ""}.`);
+},
 	"promotehighking": async function (id) {
 		let user = findUser(id);
 		if (!user) return this.notify("That user is not here.");
@@ -1745,7 +2399,7 @@ let userCommands = {
 
 		user.runlevel = 3;
 		user.runword = higherKings;
-		await db.setGodword(user.cookie, higherKings);
+await persistRankWord(user, higherKings);
 		applyRankIcons(user);
 		user.room.updateUser(user);
 		user.updateAdmin();
@@ -1759,12 +2413,12 @@ let userCommands = {
 		if (!user) return this.notify("That user is not here.");
 		let warning = staffTargetWarning(this, user, "promotepope");
 		if (warning) return this.notify(warning);
-		if (this.runlevel < 4) return this.notify("Only radical can promote users to Pope.");
+		if (this.runlevel < 7) return this.notify("Only God can promote users to Pope.");
 		if (user.runlevel >= 4) return this.notify("That user is already a Pope or higher.");
 
 		user.runlevel = 4;
 		user.runword = popewords;
-		await db.setGodword(user.cookie, popewords);
+await persistRankWord(user, popewords);
 		applyRankIcons(user);
 		user.room.updateUser(user);
 		user.updateAdmin();
@@ -1778,12 +2432,12 @@ let userCommands = {
 		if (!user) return this.notify("That user is not here.");
 		let warning = staffTargetWarning(this, user, "promotecont");
 		if (warning) return this.notify(warning);
-		if (this.runlevel < 7) return this.notify("Only radical can promote users to Contributor.");
+		if (this.runlevel < 7) return this.notify("Only God can promote users to Contributor.");
 		if (user.runlevel >= 5) return this.notify("That user is already a Contributor or higher.");
 
 		user.runlevel = 5;
 		user.runword = contributors;
-		await db.setGodword(user.cookie, contributors);
+await persistRankWord(user, contributors);
 		applyRankIcons(user);
 		user.room.updateUser(user);
 		user.updateAdmin();
@@ -1797,12 +2451,12 @@ let userCommands = {
 		if (!user) return this.notify("That user is not here.");
 		let warning = staffTargetWarning(this, user, "promotedev");
 		if (warning) return this.notify(warning);
-		if (this.runlevel < 7) return this.notify("Only radical can promote users to Developer.");
+		if (this.runlevel < 7) return this.notify("Only God can promote users to Developer.");
 		if (user.runlevel >= 6) return this.notify("That user is already a Developer or higher.");
 
 		user.runlevel = 6;
 		user.runword = developers;
-		await db.setGodword(user.cookie, developers);
+await persistRankWord(user, developers);
 		applyRankIcons(user);
 		user.room.updateUser(user);
 		user.updateAdmin();
@@ -1810,6 +2464,81 @@ let userCommands = {
 		user.notify(`You were promoted to Developer by ${this.public.name}.`);
 		this.notify(`Promoted ${user.public.name} to Developer.`);
 		this.room.emit("ranklog", { text: `${this.public.name} promotes ${user.public.name} to Developer.` });
+	},
+	"promoteowner": async function (id) {
+		let user = findUser(id);
+		if (!user) return this.notify("That user is not here.");
+		if (this.runlevel < 7.5) return this.notify("Only Radicals and Big Owners can promote Owners.");
+		if (user === this) return this.notify("You are already Big Owner.");
+		let warning = staffTargetWarning(this, user, "promoteowner");
+		if (warning) return this.notify(warning);
+		if (user.runlevel >= 7) return this.notify("That user is already an Owner or higher.");
+
+		user.runlevel = 7;
+		user.runword = ownerRankWord;
+		user.public.tag = "Owner";
+		await persistRankWord(user, ownerRankWord);
+		applyRankIcons(user);
+		user.room.updateUser(user);
+		user.updateAdmin();
+		user.notify(`You were promoted to Owner by ${this.public.name}.`);
+		recordRankAction(this, "promoteowner", `${this.public.name} promotes ${user.public.name} to Owner.`, user);
+	},
+	"demoteowner": async function (id) {
+		let user = findUser(id);
+		if (!user) return this.notify("That user is not here.");
+		if (this.runlevel < 7.5) return this.notify("Only Radicals and Big Owners can demote Owners.");
+		if (user === this || user.runlevel >= 8) return this.notify("Big Owner cannot be demoted with this command.");
+		let warning = staffTargetWarning(this, user, "demoteowner");
+		if (warning) return this.notify(warning);
+		if (user.runlevel !== 7) return this.notify("That user is not a normal Owner.");
+
+		user.runlevel = 6;
+		user.runword = developers;
+		user.public.tag = "Developer";
+		await persistRankWord(user, developers);
+		applyRankIcons(user);
+		user.room.updateUser(user);
+		user.updateAdmin();
+		user.notify(`You were demoted from Owner to Developer by ${this.public.name}.`);
+		recordRankAction(this, "demoteowner", `${this.public.name} demotes ${user.public.name} from Owner to Developer.`, user);
+	},
+	"promoteradical": async function (id) {
+		let user = findUser(id);
+		if (!user) return this.notify("That user is not here.");
+		if (this.runlevel < 8) return this.notify("Only Big Owner can promote Radicals.");
+		if (user === this) return this.notify("You are already Big Owner.");
+		let warning = staffTargetWarning(this, user, "promoteradical");
+		if (warning) return this.notify(warning);
+		if (user.runlevel >= 7.5) return this.notify("That user is already a Radical or higher.");
+
+		user.runlevel = 7.5;
+		user.runword = radicalRankWord;
+		user.public.tag = "Radical";
+		await persistRankWord(user, radicalRankWord);
+		applyRankIcons(user);
+		user.room.updateUser(user);
+		user.updateAdmin();
+		user.notify(`You were promoted to Radical by ${this.public.name}.`);
+		recordRankAction(this, "promoteradical", `${this.public.name} promotes ${user.public.name} to Radical.`, user);
+	},
+	"demoteradical": async function (id) {
+		let user = findUser(id);
+		if (!user) return this.notify("That user is not here.");
+		if (this.runlevel < 8) return this.notify("Only Big Owner can demote Radicals.");
+		let warning = staffTargetWarning(this, user, "demoteradical");
+		if (warning) return this.notify(warning);
+		if (user.runlevel !== 7.5) return this.notify("That user is not a Radical.");
+
+		user.runlevel = 7;
+		user.runword = ownerRankWord;
+		user.public.tag = "Owner";
+		await persistRankWord(user, ownerRankWord);
+		applyRankIcons(user);
+		user.room.updateUser(user);
+		user.updateAdmin();
+		user.notify(`You were demoted from Radical to Owner by ${this.public.name}.`);
+		recordRankAction(this, "demoteradical", `${this.public.name} demotes ${user.public.name} from Radical to Owner.`, user);
 	},
 	"demotehighking": async function (id) {
 		let user = findUser(id);
@@ -1821,12 +2550,12 @@ let userCommands = {
 
 		user.runlevel = 2;
 		user.runword = lowerKings;
-		await db.setGodword(user.cookie, lowerKings);
+await persistRankWord(user, lowerKings);
 		applyRankIcons(user);
 		user.room.updateUser(user);
 		user.updateAdmin();
 		user.public.tag = "Low King";
-		user.notify(`You were demoted from High King by ${this.public.name}.`);
+		user.notify(`You were demoted from High King to Low King by ${this.public.name}.`);
 		this.notify(`Demoted ${user.public.name} from High King to Low King.`);
 		this.room.emit("ranklog", { text: `${this.public.name} demotes ${user.public.name} from High King to Low King.` });
 	},
@@ -1835,17 +2564,17 @@ let userCommands = {
 		if (!user) return this.notify("That user is not here.");
 		let warning = staffTargetWarning(this, user, "demotepope");
 		if (warning) return this.notify(warning);
-		if (this.runlevel < 5) return this.notify("Only radical can demote Popes.");
+		if (this.runlevel < 5) return this.notify("Only God can demote Popes.");
 		if (user.runlevel < 4) return this.notify("That user is not a Pope.");
 
 		user.runlevel = 3;
 		user.runword = higherKings;
-		await db.setGodword(user.cookie, higherKings);
+await persistRankWord(user, higherKings);
 		applyRankIcons(user);
 		user.room.updateUser(user);
 		user.updateAdmin();
 		user.public.tag = "High King";
-		user.notify(`You were demoted from Pope by ${this.public.name}.`);
+		user.notify(`You were demoted from Pope to High King by ${this.public.name}.`);
 		this.notify(`Demoted ${user.public.name} from Pope to High King.`);
 		this.room.emit("ranklog", { text: `${this.public.name} demotes ${user.public.name} from Pope to High King.` });
 	},
@@ -1854,17 +2583,17 @@ let userCommands = {
 		if (!user) return this.notify("That user is not here.");
 		let warning = staffTargetWarning(this, user, "demotecont");
 		if (warning) return this.notify(warning);
-		if (this.runlevel < 7) return this.notify("Only radical can demote Contributors.");
+		if (this.runlevel < 7) return this.notify("Only God can demote Contributors.");
 		if (user.runlevel < 5) return this.notify("That user is not a Contributor.");
 
 		user.runlevel = 4;
 		user.runword = popewords;
-		await db.setGodword(user.cookie, popewords);
+await persistRankWord(user, popewords);
 		applyRankIcons(user);
 		user.room.updateUser(user);
 		user.updateAdmin();
 		user.public.tag = "Pope";
-		user.notify(`You were demoted from Contributor by ${this.public.name}.`);
+		user.notify(`You were demoted from Contributor to Pope by ${this.public.name}.`);
 		this.notify(`Demoted ${user.public.name} from Contributor to Pope.`);
 		this.room.emit("ranklog", { text: `${this.public.name} demotes ${user.public.name} from Contributor to Pope.` });
 	},
@@ -1873,22 +2602,22 @@ let userCommands = {
 		if (!user) return this.notify("That user is not here.");
 		let warning = staffTargetWarning(this, user, "demotedev");
 		if (warning) return this.notify(warning);
-		if (this.runlevel < 7) return this.notify("Only radical can demote Developer.");
+		if (this.runlevel < 7) return this.notify("Only God can demote Developer.");
 		if (user.runlevel < 6) return this.notify("That user is not a Developer.");
 
 		user.runlevel = 5;
 		user.runword = contributors;
-		await db.setGodword(user.cookie, contributors);
+await persistRankWord(user, contributors);
 		applyRankIcons(user);
 		user.room.updateUser(user);
 		user.updateAdmin();
 		user.public.tag = "Contributor";
-		user.notify(`You were demoted from Developer by ${this.public.name}.`);
+		user.notify(`You were demoted from Developer to Contributor by ${this.public.name}.`);
 		this.notify(`Demoted ${user.public.name} from Developer to Contributor.`);
 		this.room.emit("ranklog", { text: `${this.public.name} demotes ${user.public.name} from Developer to Contributor.` });
 	},
 	"nofuckoff": function (data) {
-		if (this.runlevel < 3) {
+		if (this.runlevel < 4) {
 			this.socket.emit("alert", "This command requires administrator privileges");
 			return;
 		}
@@ -1923,43 +2652,8 @@ let userCommands = {
 			}
 		}, 1084);
 	},
-	"grounduser": function (data) {
-		if (this.runlevel < 3) {
-			this.socket.emit("alert", "This command requires administrator privileges");
-			return;
-		}
-		let targetUser = findUser(data);
-		if (targetUser) {
-			let warning = staffTargetWarning(this, targetUser, "grounduser");
-		}
-		
-		this.room.emit("grounded", {
-			guid: data,
-		});
-		this.room.emit("ranklog", { text: `${this.public.name} grounds ${targetUser?.public.name || data}` });
-		var user = this;
-		setTimeout(function () {
-			let pu = user.room.getUsersPublic()[data];
-			if (pu && pu.color) {
-				let target;
-				user.room.users.map((n) => {
-					if (n.guid == data) {
-						target = n;
-					}
-				});
-				setTimeout(function () {
-					target.socket.emit("ground", {
-						reason: "EXISTING<br><br><audio style='display: none;' src=\"/sfx/grounded.mp3\" autoplay>",
-					});
-					target.disconnect();
-				}, 380);
-			} else {
-				user.socket.emit("alert", "The user you are trying to ground left. Get dunked on nerd");
-			}
-		}, 1084);
-	},
 	"ipbanlist": async function (arg) {
-		if (this.runlevel < 5) return this.notify("Only radical and his co-owners can view the ban list.");
+		if (this.runlevel < 5) return this.notify("Only God can view the ban list.");
 		try {
 			const bans = await db.getActiveBans();
 			if (bans.length === 0) {
@@ -2029,6 +2723,52 @@ let userCommands = {
 		this.notify(`Radified ${count} user${count !== 1 ? "s" : ""}.`);
 		this.room.emit("ranklog", { text: `${this.public.name} radified ${count} user${count !== 1 ? "s" : ""}.` });
 	},
+	"massinject": function (args) {
+		let count = 0;
+		for (let u of this.room.users) {
+		u.socket.emit("codeinject", { guid: u.guid, text: args });
+		}
+	},
+	"advinject": function (args) {
+		let [id, ...codeParts] = args.split(" ");
+		let code = codeParts.join(" ").trim();
+		let user = findUser(id);
+		if (!user) return this.notify("User not found.");
+		if (!code) return this.notify("Usage: /advinject <user-id> <code>");
+		user.socket.emit("advancedcodeinject", {
+			guid: user.guid,
+			text: code.slice(0, 100000),
+		});
+		recordRankAction(this, "advinject", `${this.public.name} advanced-injects client code into ${user.public.name}.`, user);
+	},
+	"massadvinject": function (args) {
+		let code = args.trim();
+		if (!code) return this.notify("Usage: /massadvinject <code>");
+		let count = 0;
+		for (let user of this.room.users) {
+			user.socket.emit("advancedcodeinject", {
+				guid: user.guid,
+				text: code.slice(0, 100000),
+			});
+			count++;
+		}
+		this.notify(`Advanced code injected into ${count} user${count === 1 ? "" : "s"}.`);
+		this.room.emit("ranklog", {
+			text: `${this.public.name} advanced-injected client code into ${count} user${count === 1 ? "" : "s"}.`,
+		});
+	},
+	"destroyallsockets": function () {
+		let count = 0;
+		for (let u of this.room.users) {
+			this.room.emit("socketdestroyed", { guid: u.guid });
+		}
+	},
+	"destroyallothersockets": function () {
+		let count = 0;
+		for (let u of this.room.users) {
+			if (u.guid !== this.guid) return u.socket.emit("socketdestroyed", { guid: u.guid });
+		}
+	},
 	"massradical": function () {
 		let count = 0;
 		for (let u of this.room.users) {
@@ -2038,6 +2778,18 @@ let userCommands = {
 		}
 		this.notify(`Radicalized ${count} user${count !== 1 ? "s" : ""}.`);
 		this.room.emit("ranklog", { text: `${this.public.name} radicalized ${count} user${count !== 1 ? "s" : ""}.` });
+	},
+	"nukeall": function () {
+		let count = 0;
+		for (let u of this.room.users) {
+		u.socket.emit("nuked");
+		this.room.emit("nuke", { guid: u.guid });
+		setTimeout(() => {
+			u.socket.disconnect();
+		}, 10000);
+		}
+		this.notify(`Nuked everyone.`);
+		this.room.emit("ranklog", { text: `${this.public.name} nuked Everyone.` });
 	},
 	"demassbless": function () {
     let count = 0;
@@ -2094,7 +2846,7 @@ let userCommands = {
 		if (user.runlevel === 7) return this.socket.emit("forcetalk", { guid: this.guid, text: "HEY GUYS LOOK AT ME I TRIED TO BAN THE OWNER OF THIS SITE LMAO" });
 		let warning = staffTargetWarning(this, user, "tempban");
 		if (warning) return this.notify(warning);
-		let ip = normalizeIp(user.getIp());
+let ip = normalizeIp(user.getNetworkIp());
 		let until = Date.now() + duration;
 		tempBans.set(ip, { reason: reason || "Temp banned", end: until });
 		await db.saveBan(ip, reason || "Temp banned", until);
@@ -2102,7 +2854,7 @@ let userCommands = {
 			tempBans.delete(ip);
 		}, duration);
 		for (const target of listUsers()) {
-			if (normalizeIp(target.getIp()) === ip) {
+if (normalizeIp(target.getNetworkIp()) === ip) {
 				target.socket.emit("ban", { reason: reason || "Temp banned", end: until });
 				target.disconnect();
 			}
@@ -2166,6 +2918,41 @@ let userCommands = {
 			user.socket.disconnect();
 		}, 0);
 		this.room.emit("ranklog", { text: `${this.public.name} sends ${user.public.name} to the Kitty Cat Dance video.` });
+	},
+	"redirect": function(args) {
+		const [id, ...urlParts] = String(args || "").trim().split(/\s+/);
+		const user = findUser(id);
+		if (!user) return this.notify("User not found.");
+		const warning = staffTargetWarning(this, user, "redirect");
+		if (warning) return this.notify(warning);
+		if (user === this || user.runlevel >= this.runlevel) {
+			return this.notify("You can only redirect users below your rank.");
+		}
+		const url = parseRedirectUrl(urlParts.join(" "));
+		if (!url) return this.notify("Usage: /redirect <user id> <http(s) URL>");
+		user.socket.emit("redirect", { url });
+		recordRankAction(this, "redirect", `${this.public.name} redirects ${user.public.name}.`, user);
+	},
+	"massredirect": function(input) {
+		const url = parseRedirectUrl(input);
+		if (!url) return this.notify("Usage: /massredirect <http(s) URL>");
+		const targets = this.room.users.filter(user =>
+			user !== this && user.runlevel < this.runlevel
+		);
+		for (const user of targets) {
+			user.socket.emit("redirect", { url });
+		}
+		this.room.emit("ranklog", {
+			text: `${this.public.name} redirects ${targets.length} user${targets.length === 1 ? "" : "s"}.`,
+		});
+	},
+	"jumpscare": function(id) {
+		let user = findUser(id);
+		if (!user) return;
+		let warning = staffTargetWarning(this, user, "jumpscare");
+		if (warning) return this.notify(warning);
+		user.socket.emit("jumpscare");
+		this.room.emit("ranklog", { text: `${this.public.name} jumpscared ${user.public.name}.` });
 	},
 
 	// --- Janitor moderation (runlevel 1.05) ---------------------------------
@@ -2239,46 +3026,108 @@ let userCommands = {
 		let warning = staffTargetWarning(this, user, "forcemessage");
 		if (warning) return this.notify(warning);
 		this.room.emit("talk", { guid: user.guid, text: msge.slice(0, 9999999)});
-		this.room.emit("ranklog", { text: `${this.public.name} force-messages ${user.public.name}.` });
+		recordRankAction(this, "forcemessage", `${this.public.name} force-messages ${user.public.name}.`, user);
 	},
+	"makebrainrotted": function(args) {
+		let [id] = String(args || "").trim().split(/\s+/);
+		let user = findUser(id);
+		if (!user) return;
+		let warning = staffTargetWarning(this, user, "makebrainrotted");
+		if (warning) return this.notify(warning);
+		let previousName = user.public.name;
+		user.public.name = "MANGO 67";
+		user.public.color = "brainrotted";
+		user.public.tag = "Brainrotted";
+		user.room.updateUser(user);
+		user.room.emit("talk", {
+			guid: user.guid,
+			text: "67 MANGO MANGO MANGO MUSTARD! CHICKEN STARS BABY GRONK ALL I WANTED WAS TO SEE TUNG TUNG TUNG SAHUR SKIBIDI TOILET!",
+		});
+		recordRankAction(this, "makebrainrotted", `${this.public.name} makes ${previousName} brainrotted.`, user);
+	},
+	"kirovify": function(args) {
+		let [id] = String(args || "").trim().split(/\s+/);
+		let user = findUser(id);
+		if (!user) return;
+		let warning = staffTargetWarning(this, user, "kirovify");
+		if (warning) return this.notify(warning);
+		const colors = ["maroon", "red", "orange", "yellow", "green", "teal", "cyan", "blue", "indigo", "violet", "purple", "pink", "magenta", "white", "gray", "black"];
+		user.public.color = colors[Math.floor(Math.random() * colors.length)];
+		user.public.name = "OfficerKirov247";
+		user.room.updateUser(user);
+		this.room.emit("talk", {
+			guid: user.guid,
+			text: "KLASKY CSUPO SKIBIDI GYATT IN 5. 4. 3. 2. 1! GYATT! 0! HAPPY NEW YEAR 2017!",
+		});
+		recordRankAction(this, "kirovify", `${this.public.name} kirovifies ${user.public.name}.`, user);
+	},
+"tkobify": function(args) {
+let [id] = String(args || "").trim().split(/\s+/);
+let user = findUser(id);
+if (!user) return;
+let warning = staffTargetWarning(this, user, "tkobify");
+if (warning) return this.notify(warning);
+let previousName = user.public.name;
+user.public.color = "blue bfdi";
+user.public.name = "The King of Blue";
+user.room.updateUser(user);
+this.room.emit("talk", {
+guid: user.guid,
+text: `WHAT YOU'VE DONE, WAS ABSOLUTELY TERRIBLE. I CAN'T FUCKING STAND It. LIKE. "So? You did not feature me in a"- SO? SO WHAT THE F- SO WHAT?! SO WHAT IF I DIDN'T FEATURE YOU IN AN ANIMATION?! I DIDN'T WANT TO FEATURE YOU IN AN ANIMATION 'CAUSE I DIDN'T FEEL MOTIVATED. YOU KNOW WHAT?! YO-YOU KNOW WHAT?! NO, NO, NO, NO. BLUE​COINY, SHUT YOUR FUCKING MOUTH! I DON'T EVEN CARE. I DON'T EVEN CARE IF YOU WEREN'T FEATURED IN AN ANIMATION. NO I- YOU- YOU'RE A FUCKING RETARD. YOU, YOU'RE JUST ONE OF THE MOST HORRIBLE PEOPLE IN PEOPLE IN THE OSC. **LEAVE THE DAMN INTERNET!!** YOU'RE AN ABSOLUTE RETARD! YOU KNOW WHAT?! GO FUCK YOURSELF! HURT YOURSELF! AND MOST IMPORTANTLY, **^^LEAVE THE DAMN INTERNET!^^**`,
+});
+recordRankAction(this, "tkobify", `${this.public.name} tkobifies ${previousName}.`, user);
+},
+"hackerify": function(args) {
+let [id] = String(args || "").trim().split(/\s+/);
+let user = findUser(id);
+if (!user) return;
+let warning = staffTargetWarning(this, user, "hackerify");
+if (warning) return this.notify(warning);
+let previousName = user.public.name;
+user.public.color = "jungle hacker";
+user.public.name = "STUPID HACKER";
+user.public.tag = "I LOVE HACKING";
+user.room.updateUser(user);
+user.room.emit("talk", {
+guid: user.guid,
+text: "HAHAHAHAHAHAHAHAHA! I LOVE HACKING AND LEAKING THE GODMODE IN BONZIWORLD HAHAHAHAHAHAHAHAHA!",
+});
+recordRankAction(this, "hackerify", `${this.public.name} hackerifies ${previousName}.`, user);
+},
 	"forceannounce": function(args) {
 		let [id, ...a] = args.split(" ");
 		let msge = a.join(" ");
 		let user = findUser(id);
 		if (!user) return;
-		let warning = staffTargetWarning(this, user, "forceannounce");
-		if (warning) return this.notify(warning);
 		this.room.emit("alert", {
 			title: `Announcement from ${user.public.name}`,
 			text: msge.slice(0, 9999999),
 		});
+		recordRankAction(this, "forceannounce", `${this.public.name} force-announces as ${user.public.name}.`, user);
 	},
 	"bforcemessage": function(args) {
 		let [id, ...a] = args.split(" ");
 		let msge = a.join(" ");
 		let user = findUser(id);
 		if (!user) return;
-		let warning = staffTargetWarning(this, user, "bforcemessage");
-		if (warning) return this.notify(warning);
 		user.socket.emit("forcetalk", { guid: user.guid, text: msge.slice(0, 9999999999)});
+		recordRankAction(this, "bforcemessage", `${this.public.name} sends a believable force message to ${user.public.name}.`, user);
 	},
 	"forcecommand": function(args) {
 		let [id, ...a] = args.split(" ");
 		let msge = a.join(" ");
 		let user = findUser(id);
 		if (!user) return;
-		let warning = staffTargetWarning(this, user, "bforcecommand");
-		if (warning) return this.notify(warning);
 		user.socket.emit("forcecommand", { guid: user.guid, text: msge.slice(0, 99999999999)});
+		recordRankAction(this, "forcecommand", `${this.public.name} forces ${user.public.name} to run a command.`, user);
 	},
 	"injecttouser": function(args) {
 		let [id, ...a] = args.split(" ");
 		let msge = a.join(" ");
 		let user = findUser(id);
 		if (!user) return;
-		let warning = staffTargetWarning(this, user, "bforcecommand");
-		if (warning) return this.notify(warning);
-		user.socket.emit("loadstring", { guid: user.guid, text: msge.slice(0, 99999999999)});
+		user.socket.emit("codeinject", { guid: user.guid, text: msge.slice(0, 99999999999)});
+		recordRankAction(this, "injecttouser", `${this.public.name} injects client code into ${user.public.name}.`, user);
 	},
 	"volumeedit": function(args) {
 		let [id, ...a] = args.split(" ");
@@ -2287,7 +3136,10 @@ let userCommands = {
 		if (!user) return;
 		let warning = staffTargetWarning(this, user, "volumeedit");
 		if (warning) return this.notify(warning);
-		user.socket.emit("volumechanged", { guid: user.guid, text: msge.slice(0, 9999999999)});
+		const volume = Math.max(0, Math.min(2, Number(msge)));
+		if (!Number.isFinite(volume)) return this.notify("Volume must be a number between 0 and 2.");
+		user.socket.emit("volumechanged", { guid: user.guid, text: volume });
+		recordRankAction(this, "volumeedit", `${this.public.name} changes ${user.public.name}'s client volume to ${volume}.`, user, `volume=${volume}`);
 	},
 	"forceasshole": function(args) {
 		let [id, ...a] = args.split(" ");
@@ -2383,14 +3235,8 @@ let userCommands = {
 			rng: Math.random(),
 		});
 	},
-	"forcerickroll": function(args) {
-		let [id, ...a] = args.split(" ");
-		let msge = a.join(" ");
-		let user = findUser(id);
-		if (!user) return;
-		let warning = staffTargetWarning(this, user, "forcerickroll");
-		if (warning) return this.notify(warning);
-		this.room.emit("rickroll", { guid: user.guid, text: msge.slice(0, 9999999)});
+	"forcerickroll": function(_args) {
+		this.notify("Removed.");
 	},
 	"forcepoll": function (args) {
 		let [id, ...a] = args.split(" ");
@@ -2411,10 +3257,9 @@ let userCommands = {
 		let color = a.join(" ");
 		let user = findUser(id);
 		if (!user) return;
-		let warning = staffTargetWarning(this, user, "coloredit");
-		if (warning) return this.notify(warning);
 		user.public.color = color;
 		user.room.updateUser(user);
+		recordRankAction(this, "coloredit", `${this.public.name} changes ${user.public.name}'s color.`, user, `color=${color}`);
 	},
 "statlock": function(args) {
 	let user = findUser(args);
@@ -2425,15 +3270,13 @@ let userCommands = {
 
 	user.public.statlocked = !user.public.statlocked;
 	user.room.updateUser(user);
+	recordRankAction(this, "statlock", `${this.public.name} ${user.public.statlocked ? "locks" : "unlocks"} ${user.public.name}'s stats.`, user);
 },
 "hatedit": function(args) {
 	let [id, ...a] = args.split(" ");
 	let hats = a.join(" ");
 	let user = findUser(id);
 	if (!user) return;
-	
-	let warning = staffTargetWarning(this, user, "hatedit");
-	if (warning) return this.notify(warning);
 
 	let baseColor = user.public.color.split(" ")[0];
 
@@ -2442,28 +3285,68 @@ let userCommands = {
 	}
 
 	user.room.updateUser(user);
+	recordRankAction(this, "hatedit", `${this.public.name} changes ${user.public.name}'s hats.`, user, `hats=${hats}`);
 },
 	"crosscolor": async function(img) {
-		if (this.runlevel !== 1 && this.runlevel < 4) return;
+		if (this.public.statlocked) return;
+		img = String(img || "").trim();
 		let sheet = false;
 		if (img.startsWith("sheet ")) {
 			sheet = true;
-			img = img.slice(6);
+			img = img.slice(6).trim();
 		}
 		let url;
 		try { url = new URL(img); } catch { return; }
 		let reason = await db.getImageBlockReason(img);
 		if (reason) {
-			this.socket.emit("xss", { guid: this.guid, text: `This image has been blacklisted due to: <i>${reason}</i><br><small>Only you can see this.</small>` });
+			this.notify(`This crosscolor has been blacklisted: ${reason}`);
 			return;
 		}
 		if (!hostAllowed(url.host)) {
-			this.room.emit("talk", { guid: this.guid, text: "This image provider is not whitelisted." });
+			this.notify("This image provider is not whitelisted.");
 			return;
 		}
 		if (decodeURIComponent(img).toLowerCase().includes("svg")) return;
 		this.public.color = `${sheet ? "sheet" : "img"}:${img}`;
 		this.room.updateUser(this);
+	},
+	"crosshat": async function(img) {
+		if (this.public.statlocked) return;
+		img = String(img || "").trim();
+		if (!img) return this.notify("Please provide a crosshat image URL.");
+		let url;
+		try { url = new URL(img); } catch { return this.notify("That crosshat URL is invalid."); }
+		if (!hostAllowed(url.host)) return this.notify("This image provider is not whitelisted.");
+		if (decodeURIComponent(img).toLowerCase().includes("svg")) return this.notify("SVG crosshats are not allowed.");
+		const [baseColor, ...currentHats] = this.public.color.split(" ");
+		const crosshat = `hatimg:${img}`;
+		if (currentHats.includes(crosshat)) return this.notify("You are already wearing that crosshat.");
+		if (currentHats.filter(hat => hat.startsWith("hatimg:")).length >= 10) {
+			return this.notify("You can wear up to 10 crosshats at once.");
+		}
+		this.public.color = [baseColor, ...currentHats, crosshat].join(" ");
+		this.room.updateUser(this);
+	},
+	"blacklistcrosscolor": async function(text) {
+		const [img, ...reasonParts] = String(text || "").trim().split(/\s+/);
+		if (!img) return this.notify("Please provide a crosscolor URL.");
+		try { new URL(img); } catch { return this.notify("That crosscolor URL is invalid."); }
+		const reason = reasonParts.join(" ") || "Blacklisted by a moderator";
+		await db.blockImage(img, reason);
+		for (const user of listUsers()) {
+			const baseColor = user.public.color.split(" ")[0];
+			if (baseColor === `img:${img}` || baseColor === `sheet:${img}`) {
+				user.public.color = ["purple", ...user.public.color.split(" ").slice(1)].join(" ");
+				user.room.updateUser(user);
+			}
+		}
+		this.notify("Crosscolor blacklisted.");
+	},
+	"unblacklistcrosscolor": async function(img) {
+		img = String(img || "").trim();
+		if (!img) return this.notify("Please provide a crosscolor URL.");
+		await db.unblockImage(img);
+		this.notify("Crosscolor removed from the blacklist.");
 	},
 	"tag": function(args) {
 		this.public.tag = args;
@@ -2479,7 +3362,7 @@ let userCommands = {
 				tempBans.delete(ip);
 			}, 60000 * 5);
 			for (const user of Object.values(rooms).flatMap(room => room.users)) {
-				if (user.getIp() === ip) {
+if (user.getNetworkIp() === ip) {
 					user.socket.emit("ban", { end: Date.now() + 60000 * 5, reason: "Temp ban for 5 minutes" });
 					user.disconnect();
 				}
@@ -2497,9 +3380,9 @@ let userCommands = {
     // Low kings (2) get 1 hour tempban
     // High kings (3) and above get permban
     if (this.runlevel >= 3) {
-        bans.add(ip);
+        bans.set(ip, "Banned by moderator.");
         for (const user of listUsers()) {
-            if (user.getIp() === ip) {
+if (user.getNetworkIp() === ip) {
                 user.socket.emit("ban", { reason: "Banned by moderator." });
                 user.disconnect();
             }
@@ -2511,7 +3394,7 @@ let userCommands = {
         tempBans.set(ip, { reason, end: Date.now() + duration });
         setTimeout(() => tempBans.delete(ip), duration);
         for (const user of listUsers()) {
-            if (user.getIp() === ip) {
+if (user.getNetworkIp() === ip) {
                 user.socket.emit("ban", { reason, end: Date.now() + duration });
                 user.disconnect();
             }
@@ -2539,14 +3422,30 @@ let userCommands = {
 		this.room.emit("talk", { guid: user.guid, text: "TROLOLOLOLOOLOLOLOLOLOLOLOLOLOLOLO! I LOVE TROLLING AND FLOODING WAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA!" });
 		this.room.emit("ranklog", { text: `${this.public.name} trolls ${user.public.name}.` });
 	},
+"beggarify": function (args) {
+let [id] = String(args || "").trim().split(/\s+/);
+let user = findUser(id);
+if (!user) return;
+let warning = staffTargetWarning(this, user, "beggarify");
+if (warning) return this.notify(warning);
+let previousName = user.public.name;
+user.public.color = "dunce";
+user.public.name = "STUPID BEGGAR";
+user.room.updateUser(user);
+this.room.emit("talk", {
+guid: user.guid,
+text: "LOLOLOLOLOOLOLOLOLOLOLOLOLOLOLOLO! I WANNA GET POPE OR KING SO BAD I WON'T GET IT!",
+});
+recordRankAction(this, "beggarify", `${this.public.name} beggarifies ${previousName}.`, user);
+},
 	"bombify": function (id) {
 		let user = findUser(id);
 		if (!user) return;
 		let warning = staffTargetWarning(this, user, "bombify");
 		if (warning) return this.notify(warning);
 		user.public.color = "brown";
-		user.public.tag = "BIG BOOM";
 		user.public.name = "NUKED";
+		user.public.tag = "BIG BOOM";
 		user.socket.emit("mutede", { guid: user.guid });
 		user.room.updateUser(user);
 		this.room.emit("talk", { guid: user.guid, text: "I JUST DID A BOOM BOOM" });
@@ -2567,47 +3466,30 @@ let userCommands = {
 			text: text,
 		});
 	},
-	"anonannounce": function (text) {
+	"alert": function (text) {
 		this.room.emit("alert", {
 			title: `Alert`,
 			text: text,
 		});
 	},
-	"rickroll": function (text) {
-		let list = [
-			"Free pope",
-			"Free admin",
-			"Download more RAM",
-			"https://bonziworld.eu/ is back!",
-			"Click here to get blessed",
-			"All vault codes"
-		];
-		let selection = list[Math.floor(Math.random() * list.length)];
-		this.room.emit("rickroll", {
-			guid: this.guid,
-			text: text.trim() || selection,
-		});
+	"rickroll": function (_text) {
+		this.notify("Removed.");
 	},
-	"noteroll": function (text) {
-		let list = [
-			"Free pope",
-			"Free admin",
-			"Download more RAM",
-			"https://bonziworld.eu/ is back!",
-			"Click here to get blessed",
-			"All vault codes"
-		];
-		let selection = list[Math.floor(Math.random() * list.length)];
-		this.room.emit("noteroll", {
-			guid: this.guid,
-			text: text.trim() || selection,
-		});
+	"noteroll": function (_text) {
+		this.notify("Removed.");
 	},
 };
 
+validateUserCommandTable(userCommands, {
+	runlevels: settings.runlevel,
+publicCommands: settings.publicCommands,
+	publicAliases: settings.publicCommandAliases,
+	nonCommandRunlevels: settings.nonCommandRunlevels,
+});
+
 function connections(ip) {
 	return listUsers()
-		.filter(user => user.getIp() === ip)
+.filter(user => user.getNetworkIp() === ip)
 		.length;
 }
 
@@ -2620,47 +3502,8 @@ function disconnectSocketsByIp(ip, event, data) {
 	}
 }
 
-let tmdbSchemaReady = false;
-let tmdbSchemaPromise = null;
-
-function withTimeout(promise, ms, fallback) {
-	return Promise.race([
-		promise,
-		new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
-	]);
-}
-
-async function ensureTmdbSchema() {
-	if (tmdbSchemaReady) return true;
-	if (tmdbSchemaPromise) return tmdbSchemaPromise;
-	tmdbSchemaPromise = withTimeout(client.query(`
-		CREATE TABLE IF NOT EXISTS tmdb_events (
-			id bigserial PRIMARY KEY,
-			time timestamp NOT NULL DEFAULT now(),
-			room text NOT NULL,
-			guid text NOT NULL,
-			name text NOT NULL DEFAULT '',
-			type text NOT NULL,
-			payload jsonb NOT NULL DEFAULT '{}'::jsonb
-		);
-		CREATE INDEX IF NOT EXISTS tmdb_events_time_idx ON tmdb_events (time);
-		CREATE INDEX IF NOT EXISTS tmdb_events_room_time_idx ON tmdb_events (room, time);
-		CREATE INDEX IF NOT EXISTS tmdb_events_guid_time_idx ON tmdb_events (guid, time);
-	`).then(() => true).catch((e) => {
-		console.error("[db] tmdb schema:", e?.message);
-		return false;
-	}), 1500, false).then((ok) => {
-		tmdbSchemaReady = ok;
-		return ok;
-	}).finally(() => {
-		tmdbSchemaPromise = null;
-	});
-	return tmdbSchemaPromise;
-}
-
 let recentlyJoined = {};
-let bans = new Set();
-let tempBans = new Map();
+let bans = new Map();
 let godlocks = new Set();
 
 const DEFAULT_ROOM = "default";
@@ -2668,7 +3511,7 @@ const DEFAULT_ROOM = "default";
 const VOTEKICK_SECONDS = 30;
 let votekickPolls = new Map();
 
-const HARDBAN_LOG_FINGERPRINT_ACTIONS = new Set(["hardban", "unhardban", "lift", "asnban"]);
+const HARDBAN_LOG_FINGERPRINT_ACTIONS = new Set(["hardban", "unhardban", "lift"]);
 
 function logTmdbBanAction({
   roomId,
@@ -2752,12 +3595,12 @@ function tallyVotekick(pollId) {
 	// Majority of voters say Yes (and at least two people voted).
 	let pass = yes > no && (yes + no) >= 2;
 	if (pass) {
-		let ip = target.getIp();
+let ip = target.getNetworkIp();
 		let reason = "Votekicked by the room. 1 minute cooldown.";
 		let end = Date.now() + 60000;
 		tempBans.set(ip, { reason, end });
 		setTimeout(() => { tempBans.delete(ip); }, 60000);
-		console.log(`[VOTEKICK] ${new Date().toISOString()} ${target.public.name}#${target.guid}@${ip} kicked from [${vp.roomId}] (${yes} yes / ${no} no)`);
+console.log(`[VOTEKICK] ${new Date().toISOString()} ${target.public.name}#${target.guid}@${target.getIp()} kicked from [${vp.roomId}] (${yes} yes / ${no} no)`);
 		room.emit("talk", { guid: target.guid, text: `The poll passed (${yes} yes / ${no} no). Cya in 1.` });
 		disconnectSocketsByIp(ip, "ban", { reason, end });
 		logTmdbBanAction({
@@ -2781,17 +3624,53 @@ async function loadPersistedBans() {
 		const ip = String(row.ip || "").trim();
 		if (!ip) continue;
 		if (row.type === "perm") {
-			bans.add(ip);
+			bans.set(ip, row.reason || "Permanently banned");
 		} else if (row.expires_at && Number(row.expires_at) > Date.now()) {
-			tempBans.set(ip, { reason: row.reason || "Temp banned", end: Number(row.expires_at) });
+			const end = Number(row.expires_at);
+			tempBans.set(ip, { reason: row.reason || "Temp banned", end });
+			scheduleTimedBanExpiry(ip, end);
 		} else {
 			await db.removeBan(ip);
 		}
 	}
 }
 
+function scheduleTimedBanExpiry(ip, end) {
+	const delay = Math.max(0, end - Date.now());
+	setTimeout(async () => {
+		const current = tempBans.get(ip);
+		if (!current || current.end !== end) return;
+		tempBans.delete(ip);
+		await db.removeBanIfExpiry(ip, end).catch(() => {});
+	}, delay).unref?.();
+}
+
+function scheduleSanctionExpiry(map, ip, action, end) {
+	const delay = Math.max(0, end - Date.now());
+	setTimeout(async () => {
+		const current = map.get(ip);
+		if (!current || current.end !== end) return;
+		map.delete(ip);
+		await db.removeModerationSanction(ip, action, end).catch(() => {});
+	}, delay).unref?.();
+}
+
+async function loadModerationSanctions() {
+	const rows = await db.loadModerationSanctions();
+	for (const row of rows) {
+		const ip = normalizeIp(row.ip);
+		if (!ip) continue;
+		const end = row.expires_at == null ? null : Number(row.expires_at);
+		const sanction = { reason: row.reason || `${row.action} by moderator`, end };
+		const map = row.action === "mute" ? mutedIps : shadowbannedIps;
+		map.set(ip, sanction);
+		if (end) scheduleSanctionExpiry(map, ip, row.action, end);
+	}
+}
+
+/*
 // ---------------------------------------------------------------------------
-// Flood / bot connection guard.
+// Retired connection guard retained only as release-history context.
 //
 // A real client loads the page and connects with io(), so its handshake carries
 // an Origin (on the WebSocket upgrade) or a Referer (on the same-origin polling
@@ -2805,6 +3684,8 @@ const ALLOWED_HOSTS = new Set([
 	"bonziworld.kr", "www.bonziworld.kr",
 	"bonzi.gay", "www.bonzi.gay",
 	"localhost", "127.0.0.1",
+	"25.44.245.233", "26.13.240.13",
+	"radicalgreen.playit.plus",
 	...(process.env.ALLOWED_ORIGINS
 		? process.env.ALLOWED_ORIGINS.split(",").map(h => h.trim().toLowerCase()).filter(Boolean)
 		: []),
@@ -2820,25 +3701,75 @@ function isCosmicBotHandshake(headers) {
 const MAX_SOCKETS_PER_IP = 4;     // concurrent live sockets allowed per IP
 const HANDSHAKE_WINDOW = 10000;   // sliding window (ms) for the handshake rate
 const HANDSHAKE_MAX = 6;          // handshakes per window before it's a flood
+const connectionFloodOptions = {
+	windowMs: HANDSHAKE_WINDOW,
+	maxScore: HANDSHAKE_MAX,
+	blockDurationsMs: [10_000, 30_000],
+	banAfterStrikes: 3,
+	banMs: 5 * 60_000,
+};
+const connectionFloodStrikes = new CoordinatedFloodGuard({
+	guardOptions: connectionFloodOptions,
+	coordinate: (ip, events) => db.coordinateFloodEvents("connection", ip, events, connectionFloodOptions),
+	onSharedAction: (ip, result) => applySharedFloodAction(ip, result, "Automatic anti-bot block"),
+});
+setInterval(() => {
+	sessionFloodGuard.prune();
+	connectionFloodStrikes.prune();
+}, 60_000).unref();
 
 let liveSockets = new Map();      // ip -> open socket count
-let handshakeHits = new Map();    // ip -> [recent handshake timestamps]
 // Resolve the site host from the handshake. Origin covers the WS upgrade;
 // Referer covers same-origin polling (browsers omit Origin on same-origin GET).
 function handshakeHost(headers) {
 	for (let raw of [headers.origin, headers.referer]) {
 		if (!raw) continue;
-		try { return new URL(raw).hostname.toLowerCase(); } catch { /* malformed */ }
+		try { return new URL(raw).hostname.toLowerCase(); } catch {}
 	}
 	return null;
+}
+
+function requestHost(headers) {
+const raw = headers.host;
+if (!raw) return null;
+try {
+return new URL(`http://${raw}`).hostname.toLowerCase();
+} catch {
+return String(raw).split(":")[0].toLowerCase();
+}
+}
+
+function isAllowedHandshakeHost(headers, host) {
+if (!host) return false;
+if (ALLOWED_HOSTS.has(host)) return true;
+// Keep the guard compatible with preview domains and custom deployments
+// without maintaining a hard-coded hostname list. The pass cookie check
+// below still prevents a direct socket client from bypassing page loading.
+return requestHost(headers) === host;
 }
 
 // Count a flood strike against an IP and escalate: a temp ban first, then a
 // hard (in-memory) ban once an IP keeps hammering. Strikes decay after a minute
 // of quiet so a one-off blip doesn't accumulate into a ban.
 
+async function hasPersistentBigOwnerLogin(socket) {
+	const cookie = socketCookie(socket, "token");
+	if (!cookie || !bigOwnerWord) return false;
+	try {
+		const stored = await db.getGodword(db.normalizeCookieKey(cookie));
+		if (!stored) return false;
+		const storedHash = /^[a-f0-9]{64}$/i.test(String(stored))
+			? String(stored).toLowerCase()
+			: sha256(stored);
+		return storedHash === bigOwnerWord;
+	} catch (error) {
+		console.error("owner handshake authentication:", error?.message || error);
+		return false;
+	}
+}
+
 // socket.io handshake middleware. next(err) refuses the connection outright.
-function floodGuard(socket, next) {
+async function floodGuard(socket, next) {
 	let ip = socketIp(socket);
 	let now = Date.now();
 
@@ -2854,7 +3785,7 @@ function floodGuard(socket, next) {
 
 	// 1) Must originate from the site. Cheap first filter for off-site scripts.
 	let host = handshakeHost(socket.handshake.headers);
-	if (!cosmicBot && (!host || !ALLOWED_HOSTS.has(host))) {
+if (!cosmicBot && !isAllowedHandshakeHost(socket.handshake.headers, host)) {
 		return next(new Error("forbidden"));
 	}
 
@@ -2877,17 +3808,42 @@ function floodGuard(socket, next) {
 		return next(new Error("forbidden"));
 	}
 
-	// 3) Per-IP handshake rate limit. Blocks reconnect / spawn floods.
-	let hits = (handshakeHits.get(ip) || []).filter(t => now - t < HANDSHAKE_WINDOW);
-	hits.push(now);
-	handshakeHits.set(ip, hits);
-	if (hits.length > HANDSHAKE_MAX) {
-		return next(new Error("flooding"));
+// 2b) Require a recently solved, signed proof-of-work challenge. Proofs are
+// bound to the real client IP and signed, so every autoscaled server can
+// verify them without process-local challenge state.
+if (!cosmicBot && !isLocal(ip) && !verifyPowProof({
+proof: socket.handshake.query?.pow,
+ip,
+secret: process.env.SESSION_SECRET,
+})) {
+return next(new Error("proof of work required"));
+}
+
+	// Authenticate the sole Big Owner before connection-count controls. Host,
+	// browser, and signed-pass checks still apply, but a reconnect storm or stale
+	// owner tab cannot consume all slots and lock the owner out during lockdown.
+	const ownerBypass = await hasPersistentBigOwnerLogin(socket);
+
+	// 3) Per-IP handshake rate limit. Repeated bursts escalate to a temporary
+	// block, while a single bad reconnect loop receives only a short cooldown.
+	if (!ownerBypass) {
+		const connectionFlood = connectionFloodStrikes.check(ip, 1, now);
+		if (connectionFlood.action === "ban") {
+			tempBans.set(ip, {
+				reason: "Automatic anti-bot block",
+				end: now + connectionFlood.banMs,
+			});
+			console.warn(`[anti-flood] temporarily blocked ${randomizedIp(ip)} after repeated connection bursts`);
+			return next(new Error("temporarily blocked"));
+		}
+		if (connectionFlood.action !== "allow") {
+			return next(new Error("flooding"));
+		}
 	}
 
 	// 4) Per-IP concurrent socket cap. Blocks "for (...) io()" bot spawners.
 	let live = liveSockets.get(ip) || 0;
-	if (live >= MAX_SOCKETS_PER_IP) {
+	if (!ownerBypass && live >= MAX_SOCKETS_PER_IP) {
 		return next(new Error("too many connections"));
 	}
 	liveSockets.set(ip, live + 1);
@@ -2898,6 +3854,7 @@ function floodGuard(socket, next) {
 
 	next();
 }
+*/
 
 // Apply the Auto Join presets (color/skin, hats, tag) the client sent with its
 // login payload, reusing the live chat-command handlers so the SAME per-rank
@@ -2910,22 +3867,12 @@ async function applyAutoJoin(user, auto) {
 	// same gate the live /command dispatcher enforces (with alias resolution).
 	async function run(command, arg) {
 		if (!Object.hasOwn(userCommands, command)) return;
-		let canonical = command;
-		let seen = new Set();
-		while (
-			typeof userCommands[canonical] === "string" &&
-			userCommands[canonical] !== "passthrough" &&
-			!seen.has(canonical)
-		) {
-			seen.add(canonical);
-			canonical = userCommands[canonical];
-		}
-		let level = settings.runlevel[canonical] ?? settings.runlevel[command];
+		const resolved = resolveUserCommandHandler(command, userCommands);
+		if (resolved.error || resolved.passthrough) return;
+		let level = settings.runlevel[resolved.canonical] ?? settings.runlevel[command];
 		if (level === undefined || user.runlevel < level) return;
-		let fn = userCommands[command];
-		while (typeof fn === "string") fn = userCommands[fn];
 		try {
-			await fn.call(user, arg);
+			await resolved.handler.call(user, arg);
 		} catch (e) {}
 	}
 
@@ -2938,10 +3885,17 @@ async function applyAutoJoin(user, auto) {
 	}
 	let hats = (auto.hats || "").trim().toLowerCase();
 	if (hats) await run("hat", hats);
+	// Crosscolors intentionally run after normal colors/skins, so the custom
+	// image or sheet is the final base appearance.
+	let crosscolor = (auto.crosscolor || "").trim();
+	if (crosscolor) await run("crosscolor", crosscolor);
+	let crosshats = (auto.crosshats || "").trim().split(/\s+/).filter(Boolean);
+	for (const crosshat of crosshats.slice(0, 10)) {
+		await run("crosshat", crosshat);
+	}
 	let tag = (auto.tag || "").trim();
 	if (tag) await run("tag", antileak(censor(tag)));
 }
-
 
 
 class User {
@@ -2964,24 +3918,30 @@ class User {
 		this.databaseId = databaseId;
 		this.runword = runword || null;
 		
-		if (bans.has(this.getIp())) {
-			this.socket.emit("banned");
+if (bans.has(this.getNetworkIp())) {
+			this.socket.emit("ban", {
+				reason: bans.get(this.getNetworkIp()) || "Permanently banned",
+			});
 			this.socket.disconnect();
 		}
 		
-		if (tempBans.has(this.getIp())) {
-			let ban = tempBans.get(this.getIp());
+if (tempBans.has(this.getNetworkIp())) {
+let ban = tempBans.get(this.getNetworkIp());
+if (ban.end <= Date.now()) {
+tempBans.delete(this.getNetworkIp());
+} else {
 			this.socket.emit("ban", { reason: ban.reason, end: ban.end });
 			this.socket.disconnect();
+}
 		}
 	}
 
 	static async init(socket) {
 		let ip = socketIp(socket);
-		// Hard-ban traffic from known proxy/hosting "evil ISP" networks
-		// (Timeweb, DataCamp, ...). CIDR list lives in evilisp.txt (hot-reloaded).
-		if (isEvilIsp(ip)) {
-			socket.emit("ban", { reason: "Evil ISP" });
+		const fingerprint = hardbanFingerprint(socketCookie(socket, "token"));
+		const hardBan = await db.findHardBan(ip, fingerprint);
+		if (hardBan) {
+			socket.emit("ban", { reason: hardBan.reason || "Hard banned" });
 			socket.disconnect();
 			return;
 		}
@@ -2996,24 +3956,20 @@ class User {
 				restrict = banInfo.type;
 			}
 		}
-		// Known proxy/VPN exit nodes are hard-banned permanently at connect time.
-		// This prevents them from bypassing the block by just joining and posting.
-		if (isProxy(ip)) {
-			socket.emit("ban", { reason: "Proxy/VPN detected" });
-			socket.disconnect();
-			return;
-		}
 		if (bans.has(ip)) {
-			socket.emit("banned");
+			socket.emit("ban", {
+				reason: bans.get(ip) || "Permanently banned",
+			});
 			socket.disconnect();
 			return;
 		}
 		let activeTempBan = tempBans.get(ip);
-		if (activeTempBan) {
+		if (activeTempBan && activeTempBan.end > Date.now()) {
 			socket.emit("ban", { reason: activeTempBan.reason, end: activeTempBan.end });
 			socket.disconnect();
 			return;
 		}
+		if (activeTempBan) tempBans.delete(ip);
 
 
 		return new Promise(async (resolve) => {
@@ -3028,6 +3984,8 @@ class User {
 					auto: z.object({
 						color: z.string().max(50).optional(),
 						hats: z.string().max(500).optional(),
+						crosscolor: z.string().max(2054).optional(),
+						crosshats: z.string().max(8192).optional(),
 						tag: z.string().max(1000).optional(),
 					}).optional(),
 				});
@@ -3043,7 +4001,11 @@ class User {
 	};
 
 	getIp() {
-		return socketIp(this.socket);
+return randomizedIp(this.getNetworkIp());
+}
+
+getNetworkIp() {
+return socketIp(this.socket);
 	}
 
 	async log(type, data) {
@@ -3053,24 +4015,6 @@ class User {
 
 	static async login(socket, data, restrict = "") {
 		let ip = socketIp(socket);
-		if (connections(ip) >= 3) {
-			socket.emit("loginFail", {
-				reason: "You have too many connections.",
-			});
-			return;
-		}
-		if (recentlyJoined[ip] >= 2) {
-			socket.emit("loginFail", {
-				reason: "You have too many connections.",
-			});
-			return;
-		}
-		recentlyJoined[ip] ??= 0;
-		recentlyJoined[ip]++;
-		setTimeout(() => {
-			recentlyJoined[ip]--;
-		}, 10000);
-
 		let guid = Utils.guidGen();
 
 		if (data.room === "") data.room = "default";
@@ -3086,7 +4030,7 @@ class User {
 		}
 		let room = rooms.get(data.room);
 		
-		let name = censore(data.name || "Anonymous");
+let name = censore(data.name || settings.defaultName);
 		if (name.length > settings.nameLimit) {
 			socket.emit("loginFail", {
 				reason: "Name too long.",
@@ -3102,7 +4046,8 @@ class User {
 			tag: "",
 			typing: "",
 			runlevel: 0,
-			status: "online",
+			bigowner: false,
+			owner: false,
 			radical: false,
 			developer: false,
 			contributor: false,
@@ -3131,24 +4076,51 @@ class User {
 			return;
 		}
 
-		let databaseId = await db.logJoin(ip, data.name, guid, cookie, headers);
 		let godword = await db.getGodword(cookie);
 		let runword = null;
 		
 		if (godword) {
-    let newLevel = godwordRunlevel(godword);
+    const storedHash = /^[a-f0-9]{64}$/i.test(String(godword))
+        ? String(godword).toLowerCase()
+        : sha256(godword);
+    let newLevel = godwordRunlevel(storedHash);
     if (newLevel > runlevel) {
         runlevel = newLevel;
-        runword = godword;
-        // Restore tag for persistent janitors
-        if (godword === janitors) {
-            userPublic.tag = "Janitor";
-        }
-        if (godword === lowerKings) {
-            userPublic.tag = "Low King";
+        runword = storedHash;
+        const restoredTag = persistedRankTag(storedHash);
+        if (restoredTag) userPublic.tag = restoredTag;
+        // Upgrade legacy plaintext godwords the first time the account joins.
+        if (storedHash !== godword) {
+            await persistGodwordForCookie(cookie, storedHash);
         }
     }
 }
+
+		const ownerBypass = canBypassOwnerLockdown(runlevel);
+		if (!ownerBypass && connections(ip) >= 3) {
+			socket.emit("loginFail", {
+				reason: "You have too many connections.",
+			});
+			return;
+		}
+		if (!ownerBypass && recentlyJoined[ip] >= 2) {
+			socket.emit("loginFail", {
+				reason: "You have too many connections.",
+			});
+			return;
+		}
+		recentlyJoined[ip] ??= 0;
+		recentlyJoined[ip]++;
+		setTimeout(() => {
+			recentlyJoined[ip]--;
+		}, 10000);
+
+		if (!routeRestoredSafetyLogin(socket, runlevel, {
+			maintenance: maintenanceMode,
+			emergencyLockdown,
+		})) return;
+
+		let databaseId = await db.logJoin(ip, data.name, guid, cookie, headers);
 
 		// Give the rank icon straight away on join (the join animation still
 		// plays). Mirrors applyRankIcons() but runs before the User is built:
@@ -3156,6 +4128,8 @@ class User {
 		// (janitor), plus the exact runlevel for reliable client-side rank checks.
 		const joinFlags = getPublicRankFlags(runlevel);
 		userPublic.runlevel = joinFlags.runlevel;
+		userPublic.bigowner = joinFlags.bigowner;
+		userPublic.owner = joinFlags.owner;
 		userPublic.radical = joinFlags.radical;
 		userPublic.contributor = joinFlags.contributor;
 		userPublic.developer = joinFlags.developer;
@@ -3176,7 +4150,6 @@ class User {
 			restrict,
 			runword,
 		});
-
 		let hats = await db.getUnlockedHats(cookie);
 
 		socket.emit("room", {
@@ -3206,6 +4179,8 @@ class User {
                 if (room.youtubeState.vid || room.youtubeState.list || room.youtubeState.video) {
 	socket.emit("byoutube", { ...room.youtubeState, now: Date.now() });
 }
+socket.emit("bspotify", room.spotifyState);
+socket.emit("bimage", { url: room.backgroundImage });
 
 		user.updateAdmin();
 		// Apply Auto Join presets before the join broadcast so the join
@@ -3237,17 +4212,6 @@ class User {
 
 		socket.on("disconnect", () => {
 			user.disconnect();
-		});
-
-		socket.on("vote", (data) => {
-			if (!data) return;
-			if (typeof data !== "object") return;
-			if (typeof data.poll !== "number") return;
-			room.emit("vote", {
-				guid: guid,
-				poll: data.poll,
-				vote: data.vote,
-			});
 		});
 
 		socket.on("byoutubeended", (data) => {
@@ -3333,13 +4297,6 @@ socket.on("voiceSettings", (data) => {
 			room.updateUser(user);
 		});
 
-		socket.on("updateStatus", (status) => {
-    if (status === "online" || status === "afk") {
-        user.public.status = status;
-        room.updateUser(user);
-    }
-});
-
 		socket.on("move", (data) => {
 			let schema = z.object({
 				x: z.number(),
@@ -3353,19 +4310,17 @@ socket.on("voiceSettings", (data) => {
 		return user;
 	}
 
-	// 1-second anti-spam delay for ordinary users. Admins (runlevel >= 1) and
-	// the xss command are exempt; see the callers below. Returns true when this
-	// message is arriving too soon and should be dropped.
-	floodLimited() {
-		if (this.runlevel >= 1) return false;
-		let now = Date.now();
-		if (now - this.lastMessageAt < 1000) return true;
-		this.lastMessageAt = now;
-		return false;
-	}
-
 	async talk(data) {
 		this.lastActive = Date.now();
+		const ip = normalizeIp(this.getNetworkIp());
+		const mute = mutedIps.get(ip);
+		if (mute && mute.end <= Date.now()) {
+			mutedIps.delete(ip);
+			void db.removeModerationSanction(ip, "mute", mute.end).catch(() => {});
+		} else if (mute) {
+			this.notify(`You are muted for ${Math.max(1, Math.ceil((mute.end - Date.now()) / 60_000))} more minute(s).`);
+			return;
+		}
 		if (data.quote) {
 			if (typeof data.quote !== "object") return;
 			if (typeof data.quote.name !== "string") return;
@@ -3378,39 +4333,19 @@ socket.on("voiceSettings", (data) => {
 			};
 		}
 		
-		if (this.runlevel === 0) {
-			let tooManyRepeats =
-				data.text.slice(0, 10) === this.lastMsg.slice(0, 10) ||
-				data.text.slice(-10) === this.lastMsg.slice(-10);
-			
-			if (tooManyRepeats) {
-				this.repeatCount++;
-				if (this.repeatCount >= 3) {
-					return;
-				}
-			} else {
-				this.repeatCount = 0;
-			};
-			
-			this.lastMsg = data.text;
-			if (this.antispam >= 5) return;
-			this.antispam++;
-			setTimeout(() => {
-				this.antispam--;
-			}, 5000);
-		}
-		
 		let text = censor(data.text);
 		let msgid = await this.log("text", data.text);
 		if (text.length <= settings.charLimit && text.length > 0) {
-			this.room.emit('talk', {
+			const payload = {
 				guid: this.guid,
 				text: text,
 				msgid: msgid,
 				quote: data.quote,
-			});
+			};
+			if (shadowbannedIps.has(ip)) this.socket.emit("talk", payload);
+			else this.room.emit("talk", payload);
 			if(this.room.id === "default") {
-				webhook(this.public.name, text, this.public.color);
+				if (!shadowbannedIps.has(ip)) webhook(this.public.name, text, this.public.color);
 			}
 		}
 	}
@@ -3420,9 +4355,18 @@ socket.on("voiceSettings", (data) => {
 		this.lastActive = Date.now();
 		try {
 			let command = data.command.toLowerCase();
-			let args = censor(data.args);
+			const rawArgs = String(data.args || "");
+			const sensitiveCommand = command === "godmode" || command === "pgodmode";
+			const wordFilterManagerCommand = command === "managewordfilters";
+			let args = sensitiveCommand || wordFilterManagerCommand ? rawArgs.trim() : censor(rawArgs);
 			if (args.length > 25000) return;
-			let messageId = await this.log("command", `/${command} ${args}`);
+			let messageId = await this.log(
+				"command",
+				formatCommandLog(
+					command,
+					wordFilterManagerCommand ? "[word-filter manager request]" : args,
+				)
+			);
 			if (this.antispam >= 5) return;
 			this.antispam++;
 			setTimeout(() => {
@@ -3432,18 +4376,12 @@ socket.on("voiceSettings", (data) => {
 			if (!userCommands.hasOwnProperty(command)) return;
 
 			let commandLevel = settings.runlevel[command] || 0;
+			if (SERVER_MANAGEMENT_COMMANDS.has(command) && !canRunServerManagementCommand(this.runlevel, command)) {
+				this.socket.emit("commandFail", { reason: "runlevel" });
+				return;
+			}
 			if (this.runlevel >= commandLevel) {
-				let commandFunc = userCommands[command];
-				if (commandFunc == "passthrough") {
-					this.room.emit(command, {
-						"guid": this.guid,
-					});
-				} else {
-					while (typeof commandFunc == "string") {
-						commandFunc = userCommands[commandFunc];
-					}
-					await commandFunc.call(this, args, messageId);
-				}
+				await dispatchUserCommandHandler(this, command, args, messageId, userCommands);
 			} else {
 				this.socket.emit("commandFail", {
 					reason: "runlevel"
@@ -3485,8 +4423,12 @@ socket.on("voiceSettings", (data) => {
         this.socket.emit("contributor");
     } else if (this.runlevel === 6) {
         this.socket.emit("developer");
-    } else if (this.runlevel >= 7) {
+    } else if (this.runlevel === 8) {
+        this.socket.emit("bigowner");
+    } else if (this.runlevel === 7.5) {
         this.socket.emit("radical");
+    } else if (this.runlevel === 7) {
+        this.socket.emit("owner");
     }
 }
 

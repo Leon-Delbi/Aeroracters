@@ -1,0 +1,68 @@
+/* Dreamcast-inspired theme, paired with synthesized menu music by themeify(). */
+:root {
+    --dc-orange: #f05a22;
+    --dc-blue: #4a84c6;
+}
+
+@keyframes dreamcast-orbit {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+#content {
+    background:
+        radial-gradient(circle at center, #ffffff 0 22%, transparent 23%),
+        repeating-radial-gradient(circle at center, transparent 0 38px, #f05a2222 40px 42px),
+        linear-gradient(145deg, #f7f7f7, #cfd4d8);
+}
+
+#content::after {
+    content: "";
+    position: absolute;
+    width: 150px;
+    height: 150px;
+    left: calc(50% - 75px);
+    top: calc(50% - 75px);
+    border: 8px solid var(--dc-orange);
+    border-left-color: transparent;
+    border-radius: 50%;
+    box-sizing: border-box;
+    opacity: .38;
+    pointer-events: none;
+    animation: dreamcast-orbit 7s linear infinite;
+}
+
+#chat_bar {
+    background: linear-gradient(#fefefe, #bfc7cd);
+    border-top: 2px solid var(--dc-orange);
+}
+
+#start_button, #chat_send {
+    background-image: none;
+    background: radial-gradient(circle, #fff 38%, #ef6a32 40% 54%, #b83d12 56%);
+    border-radius: 50%;
+}
+
+.window_header {
+    background: linear-gradient(90deg, #326da8, #72a7d1);
+    border-color: #214d7d;
+    color: white;
+}
+
+.window_body, #start_menu_body, .bubble, .bonzi_name, .bonzi_tag {
+    background: linear-gradient(#fff, #e6eaed);
+    border-color: #68839b;
+}
+
+#start_menu {
+    filter: grayscale(.25) hue-rotate(165deg) saturate(.75);
+}
+
+#page_login {
+    background: radial-gradient(circle at center, #fff 0 28%, #d8dde0 70%, #aeb6bc 100%);
+}
+
+#login_card, #login_readme {
+    border: 2px solid var(--dc-orange);
+    box-shadow: 0 4px 16px #5a6b7a55;
+}
